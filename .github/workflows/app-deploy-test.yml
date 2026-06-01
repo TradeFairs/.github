@@ -1,0 +1,214 @@
+# app-deploy-test.yml — reusable deploy-to-test workflow (ADR-023 §K.2).
+# build job runs on GitHub-hosted runner (internet access for ghcr.io push).
+# deploy job runs on self-hosted runner (direct kubectl access to k3s on liv11).
+# Callers: TradeFairs/<app>/.github/workflows/deploy-test.yml (uses: TradeFairs/.github/.github/workflows/app-deploy-test.yml@main)
+name: App Deploy to test (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      slug:
+        required: true
+        type: string
+      basePath:
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-${{ inputs.slug }}
+  cancel-in-progress: false  # never cancel a running deploy mid-rollout
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ── 1. Build & push image ────────────────────────────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image_tag: ${{ steps.version.outputs.image_tag }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read version from package.json
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          # Pre-flight: main must always be in SNAPSHOT state (ADR-023 §B.2).
+          if [[ "$VERSION" != *-SNAPSHOT ]]; then
+            echo "::error::package.json version '$VERSION' does not end with -SNAPSHOT."
+            echo "::error::main branch must always be in SNAPSHOT state. Run the release"
+            echo "::error::workflow to bump after a release, or fix package.json manually."
+            exit 1
+          fi
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_TAG="${VERSION}-test-${SHORT_SHA}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION  Image tag: $IMAGE_TAG"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.NPM_TOKEN }}
+
+      - name: Build and push test image
+        uses: docker/build-push-action@v7
+        with:
+          push: true
+          secrets: |
+            NPM_TOKEN=${{ secrets.NPM_TOKEN }}
+          build-args: |
+            APP_BASE_PATH=${{ inputs.basePath }}
+            NEXT_PUBLIC_BVV_ENV=test
+            NEXT_PUBLIC_APP_VERSION=${{ steps.version.outputs.version }}
+            APP_GIT_COMMIT=${{ github.sha }}
+            APP_BUILD_TIME=${{ fromJSON(toJSON(github.event.head_commit.timestamp)) }}
+          tags: |
+            ghcr.io/tradefairs/${{ inputs.slug }}:${{ steps.version.outputs.image_tag }}
+            ghcr.io/tradefairs/${{ inputs.slug }}:test
+          cache-from: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache,mode=max
+
+  # ── 2. Deploy to <slug>-test namespace ──────────────────────────────────────
+  deploy:
+    runs-on: self-hosted
+    needs: build
+    env:
+      IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
+      NS: ${{ inputs.slug }}-test
+      IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Free Docker disk space
+        run: sudo docker system prune -f
+
+      - name: Ensure k3s containerd proxy
+        run: |
+          DESIRED='HTTP_PROXY=http://bvvproxy.brno.bvv.cz:8080
+          HTTPS_PROXY=http://bvvproxy.brno.bvv.cz:8080
+          NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16,.svc,.cluster.local'
+          ENV_FILE=/etc/systemd/system/k3s.service.env
+          CURRENT=$(cat "$ENV_FILE" 2>/dev/null || true)
+          if [ "$DESIRED" != "$CURRENT" ]; then
+            echo "$DESIRED" | sudo tee "$ENV_FILE"
+            sudo systemctl daemon-reload
+            sudo systemctl restart k3s
+            echo "k3s restarted. Waiting 15s..."
+            sleep 15
+          else
+            echo "Proxy env unchanged, skipping k3s restart."
+          fi
+          sudo kubectl get nodes
+
+      - name: Pull image into k3s containerd
+        run: |
+          sudo k3s ctr -n k8s.io images pull \
+            --user "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "$IMAGE:$IMAGE_TAG"
+          echo "Pulled into k3s containerd:"
+          sudo k3s ctr -n k8s.io images ls -q | grep "${{ inputs.slug }}" | head -5
+
+      - name: Run DB migrations (pre-deploy Job)
+        run: |
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-12)
+          JOB_NAME="${{ inputs.slug }}-migrate-${SHORT_SHA}"
+          sudo kubectl -n "$NS" delete job "$JOB_NAME" --ignore-not-found
+          sed "s|__JOB_NAME__|${JOB_NAME}|g; s|__IMAGE_TAG__|${IMAGE_TAG}|g; s|name: ${{ inputs.slug }}-env|name: ${{ inputs.slug }}-env-test|g" k8s/job-migrate.yaml \
+            | sudo kubectl apply -n "$NS" -f -
+          set +e
+          sudo kubectl -n "$NS" wait --for=condition=complete --timeout=300s "job/$JOB_NAME"
+          COMPLETE=$?
+          if [ $COMPLETE -ne 0 ]; then
+            echo "::error::Migration Job did not complete successfully"
+            sudo kubectl -n "$NS" describe "job/$JOB_NAME" || true
+            sudo kubectl -n "$NS" logs --tail=200 "job/$JOB_NAME" || true
+            exit 1
+          fi
+          set -e
+
+      - name: Set image tag in test overlay kustomization
+        run: |
+          cd k8s/overlays/test
+          sudo kubectl kustomize edit set image ghcr.io/tradefairs/${{ inputs.slug }}=ghcr.io/tradefairs/${{ inputs.slug }}:$IMAGE_TAG 2>/dev/null || \
+            sed -i "s/newTag: .*/newTag: $IMAGE_TAG/" kustomization.yaml
+          cat kustomization.yaml
+
+      - name: Apply manifests
+        run: |
+          # The overlay pulls a remote kustomize base from the PRIVATE
+          # TradeFairs/infra-liv11 repo. The runner's sudoers only allows passwordless
+          # `sudo kubectl` (not `sudo git`), and `kubectl apply -k` under sudo would
+          # fetch as root (no creds → timeout). So: RENDER as the runner user (with
+          # an NPM_TOKEN url-rewrite in the runner user's git config — no sudo, no
+          # cluster access needed for `kubectl kustomize`), then `sudo kubectl apply`
+          # the static rendered manifests.
+          git config --global url."https://x-access-token:${{ secrets.NPM_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          kubectl kustomize k8s/overlays/test/ > /tmp/${{ inputs.slug }}-manifests.yaml
+          sudo kubectl apply -f /tmp/${{ inputs.slug }}-manifests.yaml
+          sudo kubectl rollout restart deployment/${{ inputs.slug }} -n "$NS"
+
+      - name: Wait for rollout
+        run: sudo kubectl rollout status deployment/${{ inputs.slug }} -n "$NS" --timeout=300s
+
+      - name: Verify deployed pod runs the new image
+        run: |
+          EXPECTED="$IMAGE:$IMAGE_TAG"
+          DEPLOY_IMG=$(sudo kubectl get deployment ${{ inputs.slug }} -n "$NS" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          POD_IMG=$(sudo kubectl get pod -n "$NS" -l app=${{ inputs.slug }} \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].spec.containers[0].image}')
+          echo "Expected:        $EXPECTED"
+          echo "Deployment spec: $DEPLOY_IMG"
+          echo "Running pod:     $POD_IMG"
+          FAIL=0
+          [ "$DEPLOY_IMG" != "$EXPECTED" ] && echo "::error::Deployment image mismatch" && FAIL=1
+          [ "$POD_IMG"    != "$EXPECTED" ] && echo "::error::Running pod image mismatch"  && FAIL=1
+          [ "$FAIL" = "1" ] && exit 1
+          echo "::notice::Deployed image verified: $EXPECTED"
+
+      - name: Smoke test ${{ inputs.basePath }}/api/version
+        run: |
+          sleep 10
+          RESPONSE=$(curl -fsSk --noproxy 'test-liv11.brno.bvv.cz,liv11.brno.bvv.cz' \
+            https://test-liv11.brno.bvv.cz${{ inputs.basePath }}/api/version)
+          echo "Response: $RESPONSE"
+          # Assert version field matches the SNAPSHOT version we built
+          EXPECTED_VER="${{ needs.build.outputs.version }}"
+          python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          got = data.get('version', '')
+          expected = '$EXPECTED_VER'
+          assert got == expected, f'Version mismatch: got={got!r} expected={expected!r}'
+          env = data.get('environment', '')
+          assert env == 'test', f'Expected environment=test, got={env!r}'
+          print(f'PASS: test-liv11.brno.bvv.cz${{ inputs.basePath }}/api/version returned version={got!r} environment={env!r}')
+          " <<< "$RESPONSE"
+
+      - name: Debug pod status (always)
+        if: always()
+        run: |
+          echo "=== Pods ==="
+          sudo kubectl get pods -n "$NS" -o wide
+          echo "=== Events ==="
+          sudo kubectl get events -n "$NS" --sort-by='.lastTimestamp' | tail -20
+          echo "=== Pod logs ==="
+          POD=$(sudo kubectl get pods -n "$NS" -l app=${{ inputs.slug }} \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          [ -n "$POD" ] && sudo kubectl logs -n "$NS" "$POD" --tail=30 2>&1 || echo "no pod logs"
