@@ -1,6 +1,7 @@
-# app-ci.yml — reusable CI workflow: lint, typecheck, unit tests, build (ADR-023 §K.1).
-# No Docker build, no deploy. GitHub-hosted runner (no self-hosted needed).
-# Callers: TradeFairs/<app>/.github/workflows/ci.yml  (uses: TradeFairs/.github/.github/workflows/app-ci.yml@main)
+# app-ci.yml — reusable CI workflow: lint, typecheck, unit tests (ADR-023 §K.1) +
+# build-once-on-PR Docker image (ADR-034). On pull_request the Docker build
+# subsumes the compile check and pushes :pr-<head-sha>; deploy-test promotes it.
+# Callers: TradeFairs/<app>/.github/workflows/ci.yml  (uses: TradeFairs/.github/.github/workflows/app-ci.yml@v2)
 name: App CI (reusable)
 
 on:
@@ -80,22 +81,51 @@ jobs:
             exit 1
           fi
 
-      - name: Build (verify bundle compiles)
-        run: pnpm build
-        env:
-          APP_BASE_PATH: ${{ inputs.basePath }}
-          NEXT_PUBLIC_APP_BASE_PATH: ${{ inputs.basePath }}
-          NEXT_PUBLIC_BVV_ENV: test
-          NEXT_PUBLIC_APP_VERSION: 0.0.0-ci
-          APP_GIT_COMMIT: ${{ github.sha }}
-          APP_BUILD_TIME: "1970-01-01T00:00:00Z"
-          AUTH_SECRET: ci-only-not-a-real-secret-${{ github.sha }}
-          AUTH_URL: http://localhost:3000
-          AUTH_KEYCLOAK_ID: ci
-          AUTH_KEYCLOAK_SECRET: ci
-          AUTH_KEYCLOAK_ISSUER: http://localhost/realms/ci
-          DATABASE_URL: postgres://${{ inputs.slug }}:dev@localhost:5432/${{ inputs.slug }}
-          DIRECTORY_API_URL: http://localhost:3001/api
-          DIRECTORY_API_CLIENT_ID: ci
-          DIRECTORY_API_CLIENT_SECRET: ci-secret
-          APP_PUBLIC_BASE_URL: http://localhost:3000${{ inputs.basePath }}
+  # ── build-once-on-PR (ADR-034) ───────────────────────────────────────────────
+  # On pull_request, build + push the production Docker image tagged by PR head
+  # SHA. deploy-test promotes (retags) this image on merge instead of rebuilding.
+  # The Docker build subsumes the former `pnpm build` compile check.
+  build-image:
+    if: github.event_name == 'pull_request'
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read version from package.json
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=pr-${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.NPM_TOKEN }}
+
+      - name: Build and push PR image
+        uses: docker/build-push-action@v7
+        with:
+          push: true
+          secrets: |
+            NPM_TOKEN=${{ secrets.NPM_TOKEN }}
+          build-args: |
+            APP_BASE_PATH=${{ inputs.basePath }}
+            NEXT_PUBLIC_APP_BASE_PATH=${{ inputs.basePath }}
+            NEXT_PUBLIC_BVV_ENV=test
+            NEXT_PUBLIC_APP_VERSION=${{ steps.meta.outputs.version }}
+            APP_GIT_COMMIT=${{ github.event.pull_request.head.sha }}
+            APP_BUILD_TIME=1970-01-01T00:00:00Z
+          tags: |
+            ghcr.io/tradefairs/${{ inputs.slug }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache
+          cache-to: |
+            type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache,mode=max
+            type=inline
