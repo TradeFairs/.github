@@ -37,6 +37,36 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.NPM_TOKEN }}
+
+      - name: Resolve PR image (ADR-034 — promote instead of rebuild)
+        id: pr_image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find the PR merged into this commit; its head SHA is the :pr-<sha> tag
+          # ci.yml (app-ci.yml@v2) built. On merge we retag that image — no rebuild.
+          PR_SHA=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0].head.sha // ""')
+          if [ -z "$PR_SHA" ]; then
+            echo "No PR associated with merge ${{ github.sha }} (direct push?). Falling back to rebuild."
+            echo "image_found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Resolved PR head SHA: $PR_SHA"
+          echo "pr_sha=$PR_SHA" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "ghcr.io/tradefairs/${{ inputs.slug }}:pr-$PR_SHA" >/dev/null 2>&1; then
+            echo "image_found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::ghcr.io/tradefairs/${{ inputs.slug }}:pr-$PR_SHA not found; will rebuild"
+            echo "image_found=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Read version from package.json
         id: version
         run: |
@@ -54,15 +84,18 @@ jobs:
           echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION  Image tag: $IMAGE_TAG"
 
-      - uses: docker/setup-buildx-action@v4
+      - name: Promote PR image (retag, no rebuild)
+        if: steps.pr_image.outputs.image_found == 'true'
+        env:
+          IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
+          PR_SHA: ${{ steps.pr_image.outputs.pr_sha }}
+          IMAGE_TAG: ${{ steps.version.outputs.image_tag }}
+        run: |
+          docker buildx imagetools create -t "$IMAGE:$IMAGE_TAG" -t "$IMAGE:test" "$IMAGE:pr-$PR_SHA"
+          echo "Promoted $IMAGE:pr-$PR_SHA → $IMAGE:$IMAGE_TAG and :test"
 
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.NPM_TOKEN }}
-
-      - name: Build and push test image
+      - name: Build and push test image (fallback — no PR image found)
+        if: steps.pr_image.outputs.image_found != 'true'
         uses: docker/build-push-action@v7
         with:
           push: true
@@ -70,6 +103,7 @@ jobs:
             NPM_TOKEN=${{ secrets.NPM_TOKEN }}
           build-args: |
             APP_BASE_PATH=${{ inputs.basePath }}
+            NEXT_PUBLIC_APP_BASE_PATH=${{ inputs.basePath }}
             NEXT_PUBLIC_BVV_ENV=test
             NEXT_PUBLIC_APP_VERSION=${{ steps.version.outputs.version }}
             APP_GIT_COMMIT=${{ github.sha }}
@@ -78,7 +112,9 @@ jobs:
             ghcr.io/tradefairs/${{ inputs.slug }}:${{ steps.version.outputs.image_tag }}
             ghcr.io/tradefairs/${{ inputs.slug }}:test
           cache-from: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache,mode=max
+          cache-to: |
+            type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache,mode=max
+            type=inline
 
   # ── 2. Deploy to <slug>-test namespace ──────────────────────────────────────
   deploy:
