@@ -1,0 +1,287 @@
+# app-release.yml — reusable release-to-production workflow (ADR-023 §K.3, PLAN-105).
+# Carries the full, identical-across-apps release ceremony so apps don't drift:
+#   preflight (SNAPSHOT + semver) → bump+commit+tag → build prod image →
+#   deploy-prod (k3s ctr pull, PLAN-047) → bump to next SNAPSHOT → push + GH Release.
+# Prod images are REBUILT (build-arg NEXT_PUBLIC_BVV_ENV=production differs from
+# test) — ADR-034 promotion is test-only/out-of-scope for release.
+# Trigger stays in the caller (PLAN-105 D7): the caller is a thin workflow_dispatch
+# that passes releaseVersion + nextVersion and `uses:` this workflow.
+# Callers: TradeFairs/<app>/.github/workflows/release.yml
+#   (uses: TradeFairs/.github/.github/workflows/app-release.yml@v2)
+name: App Release to production (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      slug:
+        required: true
+        type: string
+      basePath:
+        required: true
+        type: string
+      releaseVersion:
+        description: 'Release version (e.g. 0.2.0 — must match package.json SNAPSHOT minus suffix)'
+        required: true
+        type: string
+      nextVersion:
+        description: 'Next development version (e.g. 0.3.0 — -SNAPSHOT added automatically)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ inputs.slug }}
+  cancel-in-progress: false  # never cancel a release mid-rollout
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # full history to push commits + tag back to main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Pre-flight checks
+        id: preflight
+        run: |
+          RELEASE_VER="${{ inputs.releaseVersion }}"
+          NEXT_VER="${{ inputs.nextVersion }}"
+          CURRENT_VER=$(node -p "require('./package.json').version")
+          echo "Current package.json version: $CURRENT_VER"
+          echo "Release version requested:    $RELEASE_VER"
+          echo "Next dev version:             $NEXT_VER"
+          # 1. package.json must be <releaseVersion>-SNAPSHOT
+          EXPECTED_SNAPSHOT="${RELEASE_VER}-SNAPSHOT"
+          if [ "$CURRENT_VER" != "$EXPECTED_SNAPSHOT" ]; then
+            echo "::error::package.json is '$CURRENT_VER', expected '$EXPECTED_SNAPSHOT'."
+            echo "::error::Ensure main is at the correct SNAPSHOT before releasing."
+            exit 1
+          fi
+          # 2. nextVersion must be strictly greater (basic semver check)
+          python3 -c "
+          import sys
+          def parse(v): return tuple(int(x) for x in v.split('.'))
+          r, n = '$RELEASE_VER', '$NEXT_VER'
+          if parse(n) <= parse(r):
+            print(f'::error::nextVersion {n!r} must be > releaseVersion {r!r}')
+            sys.exit(1)
+          print(f'Version ordering OK: {r} -> {n}')
+          "
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.NPM_TOKEN }}
+
+      - name: Bump to release version
+        run: |
+          node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = '${{ inputs.releaseVersion }}';
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          git add package.json
+          git commit -m "chore(release): v${{ inputs.releaseVersion }}"
+          git tag -a "v${{ inputs.releaseVersion }}" -m "Release ${{ inputs.releaseVersion }}"
+
+      - name: Build and push prod image
+        uses: docker/build-push-action@v7
+        with:
+          push: true
+          secrets: |
+            NPM_TOKEN=${{ secrets.NPM_TOKEN }}
+          build-args: |
+            APP_BASE_PATH=${{ inputs.basePath }}
+            NEXT_PUBLIC_APP_BASE_PATH=${{ inputs.basePath }}
+            NEXT_PUBLIC_BVV_ENV=production
+            NEXT_PUBLIC_APP_VERSION=${{ inputs.releaseVersion }}
+            APP_GIT_COMMIT=${{ github.sha }}
+            APP_BUILD_TIME=${{ fromJSON(toJSON(github.event.repository.updated_at)) }}
+          tags: |
+            ${{ env.IMAGE }}:${{ inputs.releaseVersion }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache,mode=max
+
+      - name: Bump to next SNAPSHOT
+        run: |
+          node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = '${{ inputs.nextVersion }}-SNAPSHOT';
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          git add package.json
+          git commit -m "chore(release): bump to ${{ inputs.nextVersion }}-SNAPSHOT"
+
+      - name: Push commits and tag
+        run: git push origin HEAD:main "v${{ inputs.releaseVersion }}"
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "v${{ inputs.releaseVersion }}" \
+            --generate-notes \
+            --title "v${{ inputs.releaseVersion }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Deploy to prod (self-hosted runner) ──────────────────────────────────────
+  deploy-prod:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    needs: release
+    env:
+      IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
+      NS: ${{ inputs.slug }}
+      IMAGE_TAG: ${{ inputs.releaseVersion }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: v${{ inputs.releaseVersion }}  # the tag created by the release job
+
+      - name: Free Docker disk space
+        run: sudo docker system prune -f
+
+      - name: Ensure k3s containerd proxy
+        run: |
+          DESIRED='HTTP_PROXY=http://bvvproxy.brno.bvv.cz:8080
+          HTTPS_PROXY=http://bvvproxy.brno.bvv.cz:8080
+          NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16,.svc,.cluster.local'
+          ENV_FILE=/etc/systemd/system/k3s.service.env
+          CURRENT=$(cat "$ENV_FILE" 2>/dev/null || true)
+          if [ "$DESIRED" != "$CURRENT" ]; then
+            echo "$DESIRED" | sudo tee "$ENV_FILE"
+            sudo systemctl daemon-reload
+            sudo systemctl restart k3s
+            echo "k3s restarted. Waiting 15s..."
+            sleep 15
+          else
+            echo "Proxy env unchanged, skipping k3s restart."
+          fi
+          sudo kubectl get nodes
+
+      - name: Pull image into k3s containerd
+        # PLAN-047: direct ctr pull from ghcr.io — bypasses docker save/import pipe,
+        # containerd fetches only missing layers via layer dedup (~17-25× faster).
+        run: |
+          sudo k3s ctr -n k8s.io images pull \
+            --user "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "$IMAGE:$IMAGE_TAG"
+          echo "Pulled into k3s containerd:"
+          sudo k3s ctr -n k8s.io images ls -q | grep "${{ inputs.slug }}" | head -5
+
+      - name: Run DB migrations (pre-deploy Job)
+        run: |
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          JOB_NAME="${{ inputs.slug }}-migrate-${COMMIT_SHA}"
+          sudo kubectl -n "$NS" delete job "$JOB_NAME" --ignore-not-found
+          sed "s|__JOB_NAME__|${JOB_NAME}|g; s|__IMAGE_TAG__|${IMAGE_TAG}|g" k8s/job-migrate.yaml \
+            | sudo kubectl apply -n "$NS" -f -
+          set +e
+          sudo kubectl -n "$NS" wait --for=condition=complete --timeout=300s "job/$JOB_NAME"
+          COMPLETE=$?
+          if [ $COMPLETE -ne 0 ]; then
+            echo "::error::Migration Job did not complete successfully"
+            sudo kubectl -n "$NS" describe "job/$JOB_NAME" || true
+            sudo kubectl -n "$NS" logs --tail=200 "job/$JOB_NAME" || true
+            exit 1
+          fi
+          set -e
+
+      - name: Apply prod manifests
+        run: |
+          # render-then-apply (PLAN-104 X2): kubectl kustomize as runner user (with
+          # NPM_TOKEN url-rewrite for any private remote base), then sudo apply the
+          # static manifests. Works with inline OR remote k8s base.
+          git config --global url."https://x-access-token:${{ secrets.NPM_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          cd k8s/overlays/prod
+          kubectl kustomize edit set image ghcr.io/tradefairs/${{ inputs.slug }}=ghcr.io/tradefairs/${{ inputs.slug }}:$IMAGE_TAG 2>/dev/null || \
+            sed -i "s/newTag: .*/newTag: $IMAGE_TAG/" kustomization.yaml
+          cat kustomization.yaml
+          cd "$GITHUB_WORKSPACE"
+          kubectl kustomize k8s/overlays/prod/ > /tmp/${{ inputs.slug }}-prod-manifests.yaml
+          sudo kubectl apply -f /tmp/${{ inputs.slug }}-prod-manifests.yaml
+          sudo kubectl rollout restart deployment/${{ inputs.slug }} -n "$NS"
+
+      - name: Wait for rollout (with retry)
+        run: |
+          set +e
+          APP=${{ inputs.slug }}
+          for attempt in 1 2 3; do
+            if sudo kubectl rollout status deployment/$APP -n "$NS" --timeout=120s; then
+              echo "Rollout succeeded on attempt $attempt"
+              exit 0
+            fi
+            if [ $attempt -lt 3 ]; then
+              echo "::warning::Rollout attempt $attempt failed, force-deleting stuck Terminating pods..."
+              STUCK=$(sudo kubectl get pods -n "$NS" -l app=$APP --no-headers 2>/dev/null | awk '$3 == "Terminating" {print $1}')
+              if [ -n "$STUCK" ]; then
+                echo "Stuck Terminating pods: $STUCK"
+                echo "$STUCK" | xargs -r sudo kubectl delete pod -n "$NS" --force --grace-period=0 || true
+              else
+                echo "No stuck Terminating pods found"
+              fi
+              sleep 5
+            fi
+          done
+          echo "::error::Rollout failed after 3 attempts"
+          exit 1
+
+      - name: Verify deployed pod runs the release image
+        run: |
+          EXPECTED="$IMAGE:$IMAGE_TAG"
+          DEPLOY_IMG=$(sudo kubectl get deployment ${{ inputs.slug }} -n "$NS" \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          POD_IMG=$(sudo kubectl get pod -n "$NS" -l app=${{ inputs.slug }} \
+            -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{(index .spec.containers 0).image}}{{"\n"}}{{end}}{{end}}' | head -1)
+          echo "Expected:        $EXPECTED"
+          echo "Deployment spec: $DEPLOY_IMG"
+          echo "Running pod:     $POD_IMG"
+          FAIL=0
+          [ "$DEPLOY_IMG" != "$EXPECTED" ] && echo "::error::Deployment image mismatch" && FAIL=1
+          [ "$POD_IMG"    != "$EXPECTED" ] && echo "::error::Running pod image mismatch"  && FAIL=1
+          [ "$FAIL" = "1" ] && exit 1
+          echo "::notice::Deployed image verified: $EXPECTED"
+
+      - name: Smoke test ${{ inputs.basePath }}/api/version on prod
+        run: |
+          EXPECTED_VERSION="${{ inputs.releaseVersion }}"
+          for i in 1 2 3 4 5; do
+            VER=$(curl -fsk --noproxy 'liv11.brno.bvv.cz' \
+              https://liv11.brno.bvv.cz${{ inputs.basePath }}/api/version \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null)
+            [ "$VER" = "$EXPECTED_VERSION" ] && break
+            echo "Smoke attempt $i: got $VER, expected $EXPECTED_VERSION — retry in 3s"
+            sleep 3
+          done
+          [ "$VER" = "$EXPECTED_VERSION" ] || { echo "::error::Smoke test failed after 5 attempts (got $VER)"; exit 1; }
+
+      - name: Debug pod status (always)
+        if: always()
+        run: |
+          echo "=== Pods ==="
+          sudo kubectl get pods -n "$NS" -o wide
+          echo "=== Events ==="
+          sudo kubectl get events -n "$NS" --sort-by='.lastTimestamp' | tail -20
+          echo "=== Pod logs ==="
+          POD=$(sudo kubectl get pods -n "$NS" -l app=${{ inputs.slug }} \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+          [ -n "$POD" ] && sudo kubectl logs -n "$NS" "$POD" --tail=30 2>&1 || echo "no pod logs"
