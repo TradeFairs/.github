@@ -190,6 +190,11 @@ jobs:
 
       - name: Run DB migrations (pre-deploy Job)
         run: |
+          # Optional: stateless apps (e.g. bvv-directory-web) have no k8s/job-migrate.yaml.
+          if [ ! -f k8s/job-migrate.yaml ]; then
+            echo "::notice::k8s/job-migrate.yaml not present — stateless app, skipping migrations"
+            exit 0
+          fi
           COMMIT_SHA=$(git rev-parse --short HEAD)
           JOB_NAME="${{ inputs.slug }}-migrate-${COMMIT_SHA}"
           sudo kubectl -n "$NS" delete job "$JOB_NAME" --ignore-not-found
