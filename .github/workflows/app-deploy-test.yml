@@ -176,7 +176,9 @@ jobs:
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-12)
           JOB_NAME="${{ inputs.slug }}-migrate-${SHORT_SHA}"
           sudo kubectl -n "$NS" delete job "$JOB_NAME" --ignore-not-found
-          sed "s|__JOB_NAME__|${JOB_NAME}|g; s|__IMAGE_TAG__|${IMAGE_TAG}|g; s|name: ${{ inputs.slug }}-env|name: ${{ inputs.slug }}-env-test|g" k8s/job-migrate.yaml \
+          # Strip any hardcoded `namespace:` from the manifest — applied with -n "$NS";
+          # a stray (often stale prod) namespace line would conflict with the flag.
+          sed "s|__JOB_NAME__|${JOB_NAME}|g; s|__IMAGE_TAG__|${IMAGE_TAG}|g; s|name: ${{ inputs.slug }}-env|name: ${{ inputs.slug }}-env-test|g; /^[[:space:]]*namespace:[[:space:]]/d" k8s/job-migrate.yaml \
             | sudo kubectl apply -n "$NS" -f -
           set +e
           sudo kubectl -n "$NS" wait --for=condition=complete --timeout=300s "job/$JOB_NAME"
