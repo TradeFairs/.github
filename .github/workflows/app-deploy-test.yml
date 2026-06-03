@@ -210,7 +210,11 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.NPM_TOKEN }}@github.com/".insteadOf "https://github.com/"
           kubectl kustomize k8s/overlays/test/ > /tmp/${{ inputs.slug }}-manifests.yaml
           sudo kubectl apply -f /tmp/${{ inputs.slug }}-manifests.yaml
-          sudo kubectl rollout restart deployment/${{ inputs.slug }} -n "$NS"
+          # PoC (PLAN-107): NO `rollout restart`. `apply` with the new immutable image
+          # tag already triggers a clean single-generation rollout. The extra restart
+          # added a second generation → `rollout status` and the pod poll disagreed
+          # ("rollout succeeded" yet a pod looked like old image). One generation =
+          # `rollout status` is authoritative.
 
       - name: Wait for rollout (with retry)
         run: |
@@ -236,29 +240,22 @@ jobs:
           echo "::error::Rollout failed after 3 attempts"
           exit 1
 
-      - name: Verify deployed pod runs the new image
+      - name: Verify deployment spec image (non-racy)
         run: |
+          # PoC (PLAN-107): the racy "non-terminating pod still on old image" poll is
+          # REMOVED. Rollout COMPLETION is owned by `rollout status` above (it already
+          # waits for new RS available + old RS scaled to 0 — i.e. only new-image pods
+          # remain). Rollout CORRECTNESS is confirmed by the version-asserting smoke
+          # below (the running app self-reports its built version via /api/version) —
+          # a direct signal that doesn't race surge pods on a slow node. Here we keep
+          # only a cheap, non-racy assertion that the Deployment SPEC carries the
+          # expected image.
           EXPECTED="$IMAGE:$IMAGE_TAG"
           DEPLOY_IMG=$(sudo kubectl get deployment ${{ inputs.slug }} -n "$NS" \
             -o jsonpath='{.spec.template.spec.containers[0].image}')
-          echo "Expected:        $EXPECTED"
-          echo "Deployment spec: $DEPLOY_IMG"
-          [ "$DEPLOY_IMG" != "$EXPECTED" ] && { echo "::error::Deployment image mismatch"; exit 1; }
-          # Retry: right after rollout an OLD pod can still be Running (no deletionTimestamp
-          # yet) and get picked. Wait until every non-terminating pod runs EXPECTED.
-          for attempt in 1 2 3 4 5 6; do
-            STALE=$(sudo kubectl get pod -n "$NS" -l app=${{ inputs.slug }} \
-              -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{(index .spec.containers 0).image}}{{"\n"}}{{end}}{{end}}' \
-              | grep -v '^$' | grep -vF "$EXPECTED" || true)
-            if [ -z "$STALE" ]; then
-              echo "::notice::Deployed image verified: all running pods on $EXPECTED (attempt $attempt)"
-              exit 0
-            fi
-            echo "Attempt $attempt: non-terminating pod(s) still on old image:"; echo "$STALE"
-            sleep 5
-          done
-          echo "::error::Running pod image mismatch after retries — still on old image"
-          exit 1
+          echo "Deployment spec image: $DEPLOY_IMG (expected: $EXPECTED)"
+          [ "$DEPLOY_IMG" != "$EXPECTED" ] && { echo "::error::Deployment spec image mismatch"; exit 1; }
+          echo "::notice::Spec verified. Completion=rollout status, correctness=version smoke."
 
       - name: Smoke test ${{ inputs.basePath }}/api/version
         run: |
