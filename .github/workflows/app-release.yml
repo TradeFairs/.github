@@ -225,7 +225,6 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           kubectl kustomize k8s/overlays/prod/ > /tmp/${{ inputs.slug }}-prod-manifests.yaml
           sudo kubectl apply -f /tmp/${{ inputs.slug }}-prod-manifests.yaml
-          sudo kubectl rollout restart deployment/${{ inputs.slug }} -n "$NS"
 
       - name: Wait for rollout (with retry)
         run: |
