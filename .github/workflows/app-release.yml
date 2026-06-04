@@ -149,13 +149,25 @@ jobs:
     needs: release
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
-      NS: ${{ inputs.slug }}
       IMAGE_TAG: ${{ inputs.releaseVersion }}
 
     steps:
       - uses: actions/checkout@v5
         with:
           ref: v${{ inputs.releaseVersion }}  # the tag created by the release job
+
+      - name: Resolve prod namespace from overlay
+        # The kustomize `namespace:` directive in overlays/prod is the canonical target
+        # namespace — `kubectl apply -f` (below) honours it, so the verify/rollout steps
+        # must use the SAME namespace, not assume slug. Co-located apps (e.g.
+        # jira-status-web → `jira-status`) set a non-slug namespace here; deriving it
+        # keeps rollout-status/verify/smoke pointed at where the deploy actually landed.
+        # Falls back to the slug when the overlay omits `namespace:` (preserves old default).
+        run: |
+          NS=$(awk '/^namespace:[[:space:]]/{print $2; exit}' k8s/overlays/prod/kustomization.yaml)
+          NS=${NS:-${{ inputs.slug }}}
+          echo "NS=$NS" >> "$GITHUB_ENV"
+          echo "Resolved prod namespace from overlays/prod: $NS"
 
       - name: Free Docker disk space
         run: sudo docker system prune -f
