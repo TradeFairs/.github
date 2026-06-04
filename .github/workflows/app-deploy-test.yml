@@ -129,13 +129,24 @@ jobs:
     needs: build
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
-      NS: ${{ inputs.slug }}-test
       IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
 
     steps:
       - uses: actions/checkout@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve test namespace from overlay
+        # The kustomize `namespace:` directive in overlays/test is the canonical target
+        # namespace — `kubectl apply -f` (below) honours it, so the verify/rollout steps
+        # must use the SAME namespace, not assume slug+"-test". Today every app's test
+        # overlay happens to use `<slug>-test`, but deriving it removes that latent
+        # assumption. Falls back to `<slug>-test` when the overlay omits `namespace:`.
+        run: |
+          NS=$(awk '/^namespace:[[:space:]]/{print $2; exit}' k8s/overlays/test/kustomization.yaml)
+          NS=${NS:-${{ inputs.slug }}-test}
+          echo "NS=$NS" >> "$GITHUB_ENV"
+          echo "Resolved test namespace from overlays/test: $NS"
 
       - name: Free Docker disk space
         run: sudo docker system prune -f
