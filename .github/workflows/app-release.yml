@@ -271,9 +271,12 @@ jobs:
           echo "Deployment spec: $DEPLOY_IMG"
           [ "$DEPLOY_IMG" != "$EXPECTED" ] && { echo "::error::Deployment image mismatch"; exit 1; }
           # Retry: right after rollout an OLD pod can still be Running (no deletionTimestamp
-          # yet) and get picked. Wait until every non-terminating pod runs EXPECTED.
+          # yet) and get picked. Wait until every running Deployment pod runs EXPECTED.
+          # --field-selector=status.phase=Running excludes Completed CronJob/migrate Job
+          # pods that share the `app=<slug>` label (they linger for days on old images and
+          # otherwise make $STALE permanently non-empty — the dovolenky v0.11.0 false-failure).
           for attempt in 1 2 3 4 5 6; do
-            STALE=$(sudo kubectl get pod -n "$NS" -l app=${{ inputs.slug }} \
+            STALE=$(sudo kubectl get pod -n "$NS" -l app=${{ inputs.slug }} --field-selector=status.phase=Running \
               -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{(index .spec.containers 0).image}}{{"\n"}}{{end}}{{end}}' \
               | grep -v '^$' | grep -vF "$EXPECTED" || true)
             if [ -z "$STALE" ]; then
