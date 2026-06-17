@@ -17,6 +17,13 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded CI runs: pushing a new commit to a PR aborts the in-flight
+# run for the previous commit instead of letting both finish. Keyed on the PR ref
+# so concurrent PRs never cancel each other. Saves GHA minutes on rapid pushes.
+concurrency:
+  group: app-ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -86,7 +93,11 @@ jobs:
   # SHA. deploy-test promotes (retags) this image on merge instead of rebuilding.
   # The Docker build subsumes the former `pnpm build` compile check.
   build-image:
-    if: github.event_name == 'pull_request'
+    # Skip the (expensive) Docker build on DRAFT PRs — only build once the PR is
+    # marked ready for review. Iterating in draft therefore costs no image builds;
+    # deploy-test's promote-on-merge falls back to rebuild if no :pr-<sha> exists
+    # (ADR-034 "never fail closed"). See AGENTS.md "GHA cost discipline".
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     needs: ci
     runs-on: ubuntu-latest
     permissions:
