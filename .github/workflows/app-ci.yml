@@ -13,6 +13,30 @@ on:
       basePath:
         required: true
         type: string
+      # ── Optional, backward-compatible knobs (TD-115 / PLAN-114) ──────────────
+      # Defaults preserve the prior reusable behavior: no yalc/release-order gate,
+      # no DB (the former always-on postgres service was unused — no DATABASE_URL
+      # was ever wired into the test step), standard basePath guard.
+      runYalcGuard:
+        description: 'Run the yalc-ref guard on package.json (PLAN-062).'
+        type: boolean
+        default: false
+      runReleaseOrder:
+        description: 'Run the @tradefairs/* publish-order gate (.github/scripts/release-order.sh) before ci.'
+        type: boolean
+        default: false
+      postgres:
+        description: 'Provision a Postgres for the ci job: none | alpine | pgvector.'
+        type: string
+        default: none
+      dbMigrate:
+        description: 'Run `pnpm db:migrate` against the provisioned Postgres (requires postgres != none).'
+        type: boolean
+        default: false
+      basePathGuard:
+        description: 'Hardcoded-basePath-literal guard: standard | off.'
+        type: string
+        default: standard
 
 permissions:
   contents: read
@@ -25,26 +49,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
+  # ── Optional publish-order gate (opt-in via runReleaseOrder) ─────────────────
+  # Asserts every @tradefairs/* dep resolves to a published version (PLAN-063).
+  # Skipped when runReleaseOrder=false — a skipped job does not block `ci` (see
+  # the ci job's `if` guard below).
+  release-order:
+    if: inputs.runReleaseOrder
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17-alpine
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: '@tradefairs'
+      - run: bash .github/scripts/release-order.sh --check-only .
         env:
-          POSTGRES_USER: ${{ inputs.slug }}
-          POSTGRES_PASSWORD: dev
-          POSTGRES_DB: ${{ inputs.slug }}
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  ci:
+    needs: [release-order]
+    # Run after the (optional) gate: proceed when it passed OR was skipped
+    # (runReleaseOrder=false). Only a real release-order FAILURE blocks ci.
+    if: always() && (needs.release-order.result == 'success' || needs.release-order.result == 'skipped')
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Yalc guard
+        # PLAN-062 — opt-in. Fail if package.json carries dev-only file:.yalc/ refs.
+        if: inputs.runYalcGuard
+        run: |
+          if grep -q '"file:\.yalc/' package.json; then
+            echo "::error::package.json contains file:.yalc/ refs — yalc is dev-only, publish + bump before merging"
+            grep -n '"file:\.yalc/' package.json
+            exit 1
+          fi
 
       - uses: pnpm/action-setup@v4
         with: { version: 10 }
@@ -61,6 +104,26 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Start Postgres
+        # Conditional DB via step-level `docker run` (a `services:` block cannot be
+        # toggled by an input). Exports DATABASE_URL for db:migrate + DB-backed tests.
+        if: inputs.postgres != 'none'
+        run: |
+          IMAGE=postgres:17-alpine
+          if [ "${{ inputs.postgres }}" = "pgvector" ]; then IMAGE=pgvector/pgvector:pg17; fi
+          docker run -d --name ci-postgres \
+            -e POSTGRES_USER="${{ inputs.slug }}" \
+            -e POSTGRES_PASSWORD=dev \
+            -e POSTGRES_DB="${{ inputs.slug }}" \
+            -p 5432:5432 "$IMAGE"
+          echo "DATABASE_URL=postgres://${{ inputs.slug }}:dev@localhost:5432/${{ inputs.slug }}" >> "$GITHUB_ENV"
+          for i in $(seq 1 30); do
+            if docker exec ci-postgres pg_isready -U "${{ inputs.slug }}" >/dev/null 2>&1; then
+              echo "Postgres ready after ${i} attempt(s)"; break
+            fi
+            echo "Waiting for Postgres ($i/30)..."; sleep 2
+          done
+
       - name: Cache Next.js build
         uses: actions/cache@v4
         with:
@@ -70,6 +133,11 @@ jobs:
           key: ${{ runner.os }}-nextjs-${{ hashFiles('**/pnpm-lock.yaml') }}-${{ hashFiles('**/*.[jt]s', '**/*.[jt]sx') }}
           restore-keys: |
             ${{ runner.os }}-nextjs-${{ hashFiles('**/pnpm-lock.yaml') }}-
+
+      - name: DB migrate
+        # Opt-in; requires postgres != none (DATABASE_URL set by the Start Postgres step).
+        if: inputs.dbMigrate
+        run: pnpm db:migrate
 
       - name: Lint
         run: pnpm lint
@@ -82,6 +150,7 @@ jobs:
 
       - name: Guard against hardcoded basePath literals
         # ADR-024 §G — CI fails if any source file contains a hardcoded basePath literal.
+        if: inputs.basePathGuard == 'standard'
         run: |
           if grep -rn "['\"]\\${{ inputs.basePath }}['\"]" src --include='*.ts*' --exclude-dir=__tests__ 2>/dev/null; then
             echo "::error::Hardcoded basePath literal found in src/. Use APP_BASE_PATH env per ADR-024."
