@@ -33,6 +33,10 @@ on:
         description: 'Run `pnpm db:migrate` against the provisioned Postgres (requires postgres != none).'
         type: boolean
         default: false
+      dbTests:
+        description: 'Expose DATABASE_URL to the test step so DB-gated (describeIfDb) suites run in CI (requires postgres != none + dbMigrate). Default false → such suites skip.'
+        type: boolean
+        default: false
       basePathGuard:
         description: 'Hardcoded-basePath-literal guard: standard | off.'
         type: string
@@ -106,12 +110,11 @@ jobs:
 
       - name: Start Postgres
         # Conditional DB via step-level `docker run` (a `services:` block cannot be
-        # toggled by an input). DATABASE_URL is deliberately NOT exported to
-        # GITHUB_ENV — it is scoped to the DB migrate step only, matching the prior
-        # inline CI behavior. Exporting it globally would also reach `pnpm test`,
-        # un-skipping DB-gated integration suites (describeIfDb) that legacy apps
-        # never ran in CI — a behavior change, not a convergence. Apps wanting
-        # DB-backed tests in CI should opt in via a future dedicated input.
+        # toggled by an input). By default DATABASE_URL is NOT exported to GITHUB_ENV
+        # — it is scoped to the DB migrate step only, so `pnpm test` does not see it
+        # and DB-gated suites (describeIfDb) skip (the prior inline-CI behavior).
+        # Opt in via `dbTests: true` to export it globally and actually run those
+        # suites in CI (requires dbMigrate so the schema exists).
         if: inputs.postgres != 'none'
         run: |
           IMAGE=postgres:17-alpine
@@ -121,6 +124,9 @@ jobs:
             -e POSTGRES_PASSWORD=dev \
             -e POSTGRES_DB="${{ inputs.slug }}" \
             -p 5432:5432 "$IMAGE"
+          if [ "${{ inputs.dbTests }}" = "true" ]; then
+            echo "DATABASE_URL=postgres://${{ inputs.slug }}:dev@localhost:5432/${{ inputs.slug }}" >> "$GITHUB_ENV"
+          fi
           for i in $(seq 1 30); do
             if docker exec ci-postgres pg_isready -U "${{ inputs.slug }}" >/dev/null 2>&1; then
               echo "Postgres ready after ${i} attempt(s)"; break
