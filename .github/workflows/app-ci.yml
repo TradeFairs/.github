@@ -106,7 +106,12 @@ jobs:
 
       - name: Start Postgres
         # Conditional DB via step-level `docker run` (a `services:` block cannot be
-        # toggled by an input). Exports DATABASE_URL for db:migrate + DB-backed tests.
+        # toggled by an input). DATABASE_URL is deliberately NOT exported to
+        # GITHUB_ENV — it is scoped to the DB migrate step only, matching the prior
+        # inline CI behavior. Exporting it globally would also reach `pnpm test`,
+        # un-skipping DB-gated integration suites (describeIfDb) that legacy apps
+        # never ran in CI — a behavior change, not a convergence. Apps wanting
+        # DB-backed tests in CI should opt in via a future dedicated input.
         if: inputs.postgres != 'none'
         run: |
           IMAGE=postgres:17-alpine
@@ -116,7 +121,6 @@ jobs:
             -e POSTGRES_PASSWORD=dev \
             -e POSTGRES_DB="${{ inputs.slug }}" \
             -p 5432:5432 "$IMAGE"
-          echo "DATABASE_URL=postgres://${{ inputs.slug }}:dev@localhost:5432/${{ inputs.slug }}" >> "$GITHUB_ENV"
           for i in $(seq 1 30); do
             if docker exec ci-postgres pg_isready -U "${{ inputs.slug }}" >/dev/null 2>&1; then
               echo "Postgres ready after ${i} attempt(s)"; break
@@ -135,9 +139,12 @@ jobs:
             ${{ runner.os }}-nextjs-${{ hashFiles('**/pnpm-lock.yaml') }}-
 
       - name: DB migrate
-        # Opt-in; requires postgres != none (DATABASE_URL set by the Start Postgres step).
+        # Opt-in; requires postgres != none. DATABASE_URL is scoped to THIS step
+        # (not global) so it does not leak into `pnpm test` — see Start Postgres.
         if: inputs.dbMigrate
         run: pnpm db:migrate
+        env:
+          DATABASE_URL: postgres://${{ inputs.slug }}:dev@localhost:5432/${{ inputs.slug }}
 
       - name: Lint
         run: pnpm lint
