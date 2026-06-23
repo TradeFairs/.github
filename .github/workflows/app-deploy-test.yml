@@ -125,7 +125,11 @@ jobs:
 
   # ── 2. Deploy to <slug>-test namespace ──────────────────────────────────────
   deploy:
-    runs-on: self-hosted
+    # Pin to the liv11 runner: this job needs sudo + direct kubectl/k3s access to
+    # the liv11 cluster. The liv56-test-gate runner also carries the default
+    # `self-hosted` label but has neither, so a bare `runs-on: self-hosted` could
+    # land here and fail with `sudo: command not found`.
+    runs-on: [self-hosted, liv11]
     needs: build
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}

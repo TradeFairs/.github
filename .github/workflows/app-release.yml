@@ -144,7 +144,11 @@ jobs:
 
   # ── Deploy to prod (self-hosted runner) ──────────────────────────────────────
   deploy-prod:
-    runs-on: self-hosted
+    # Pin to the liv11 runner: prod deploy needs sudo + direct kubectl/k3s access
+    # to the liv11 cluster. The liv56-test-gate runner shares the default
+    # `self-hosted` label but has neither, so a bare `runs-on: self-hosted` could
+    # land there and fail (`sudo: command not found`) or misdeploy.
+    runs-on: [self-hosted, liv11]
     timeout-minutes: 20
     needs: release
     env:
