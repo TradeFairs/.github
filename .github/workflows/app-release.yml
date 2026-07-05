@@ -27,6 +27,24 @@ on:
         description: 'Next development version (e.g. 0.3.0 — -SNAPSHOT added automatically)'
         required: true
         type: string
+      # ── Optional profile knobs (TD-224 / PLAN-131 / ADR-045) ─────────────────
+      smokeMode:
+        description: >-
+          Prod smoke-test transport: ingress (default — public
+          https://liv11.brno.bvv.cz<basePath>/api/version) | port-forward
+          (kubectl port-forward to the Service + curl via localhost, for
+          cluster-internal apps without an IngressRoute — ADR-020 security
+          boundary, ADR-045 api-internal profile, e.g. bvv-directory-api).
+        type: string
+        default: ingress
+      skipTestPreflight:
+        description: >-
+          Skip the ADVISORY "test namespace runs main HEAD" preflight — for
+          prod-only apps without a test deployment (ADR-045 admin-prod-only
+          profile, e.g. bvv-test-admin). The preflight is warning-only and
+          never fails a release (see the step comment).
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -80,6 +98,33 @@ jobs:
             sys.exit(1)
           print(f'Version ordering OK: {r} -> {n}')
           "
+
+      - name: Test-env preflight (advisory) — test ns runs current main HEAD
+        # TD-224: automated, ADVISORY form of the release-skill precondition
+        # "test environment healthy and at current main HEAD". It compares the
+        # head SHA of the last successful deploy-test run on main with HEAD and
+        # emits a ::warning:: on mismatch. It NEVER fails the release: a hard
+        # gate would change behavior for existing @v2 consumers (excluded by
+        # TD-224) and would false-fail after docs-only commits (deploy-test has
+        # paths-ignore for **.md/docs/**). Prod-only apps (ADR-045
+        # admin-prod-only) skip it entirely via skipTestPreflight: true.
+        if: ${{ !inputs.skipTestPreflight }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          LATEST=$(gh api "repos/${{ github.repository }}/actions/workflows/deploy-test.yml/runs?branch=main&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // ""' 2>/dev/null)
+          if [ -z "$LATEST" ]; then
+            echo "::warning::Test-env preflight: could not resolve the last successful deploy-test run (no deploy-test.yml workflow, no successful run yet, or API error) — advisory check inconclusive."
+            exit 0
+          fi
+          if [ "$LATEST" = "${{ github.sha }}" ]; then
+            echo "Test-env preflight OK: last successful deploy-test on main is at HEAD ($LATEST)."
+          else
+            echo "::warning::Test-env preflight: last successful deploy-test on main is $LATEST but HEAD is ${{ github.sha }} — test ns may be stale (docs-only commits are a benign cause). Advisory only, not blocking."
+          fi
+          exit 0
 
       - uses: docker/setup-buildx-action@v4
 
@@ -294,6 +339,7 @@ jobs:
           exit 1
 
       - name: Smoke test ${{ inputs.basePath }}/api/version on prod
+        if: inputs.smokeMode == 'ingress'
         run: |
           EXPECTED_VERSION="${{ inputs.releaseVersion }}"
           for i in 1 2 3 4 5; do
@@ -305,6 +351,34 @@ jobs:
             sleep 3
           done
           [ "$VER" = "$EXPECTED_VERSION" ] || { echo "::error::Smoke test failed after 5 attempts (got $VER)"; exit 1; }
+
+      - name: Smoke test ${{ inputs.basePath }}/api/version on prod (cluster-internal via port-forward)
+        # smokeMode=port-forward (TD-224, ADR-045 api-internal profile): no public
+        # IngressRoute (ADR-020 security boundary) — smoke via kubectl port-forward.
+        # Procedure taken verbatim from the inline bvv-directory-api release.yml
+        # (incl. PF cleanup and the environment=production assert).
+        if: inputs.smokeMode == 'port-forward'
+        run: |
+          sleep 10
+          sudo kubectl port-forward -n "$NS" svc/${{ inputs.slug }} 19892:3000 &
+          PF_PID=$!
+          sleep 3
+          RESPONSE=$(curl -fsSk \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            --max-time 10 \
+            http://127.0.0.1:19892${{ inputs.basePath }}/api/version)
+          kill $PF_PID 2>/dev/null || true
+          echo "Response: $RESPONSE"
+          python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          got = data.get('version', '')
+          expected = '${{ inputs.releaseVersion }}'
+          assert got == expected, f'Version mismatch: got={got!r} expected={expected!r}'
+          env = data.get('environment', '')
+          assert env == 'production', f'Expected environment=production, got={env!r}'
+          print(f'PASS: /api/version returned version={got!r} environment={env!r}')
+          " <<< "$RESPONSE"
 
       - name: Debug pod status (always)
         if: always()

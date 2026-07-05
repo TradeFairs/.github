@@ -13,6 +13,16 @@ on:
       basePath:
         required: true
         type: string
+      # ── Optional profile knobs (TD-224 / PLAN-131 / ADR-045) ─────────────────
+      smokeMode:
+        description: >-
+          Smoke-test transport: ingress (default — public
+          https://test-liv11.brno.bvv.cz<basePath>/api/version) | port-forward
+          (kubectl port-forward to the Service + curl via localhost, for
+          cluster-internal apps without an IngressRoute — ADR-020 security
+          boundary, ADR-045 api-internal profile, e.g. bvv-directory-api).
+        type: string
+        default: ingress
 
 concurrency:
   group: deploy-${{ inputs.slug }}
@@ -273,6 +283,7 @@ jobs:
           echo "::notice::Spec verified. Completion=rollout status, correctness=version smoke."
 
       - name: Smoke test ${{ inputs.basePath }}/api/version
+        if: inputs.smokeMode == 'ingress'
         run: |
           sleep 10
           RESPONSE=$(curl -fsSk --noproxy 'test-liv11.brno.bvv.cz,liv11.brno.bvv.cz' \
@@ -289,6 +300,35 @@ jobs:
           env = data.get('environment', '')
           assert env == 'test', f'Expected environment=test, got={env!r}'
           print(f'PASS: test-liv11.brno.bvv.cz${{ inputs.basePath }}/api/version returned version={got!r} environment={env!r}')
+          " <<< "$RESPONSE"
+
+      - name: Smoke test ${{ inputs.basePath }}/api/version (cluster-internal via port-forward)
+        # smokeMode=port-forward (TD-224, ADR-045 api-internal profile): the app has
+        # no public IngressRoute (ADR-020 security boundary), so the smoke goes
+        # through kubectl port-forward to the Service. Procedure taken verbatim
+        # from the inline bvv-directory-api deploy-test.yml (incl. PF cleanup).
+        if: inputs.smokeMode == 'port-forward'
+        run: |
+          sleep 10
+          sudo kubectl port-forward -n "$NS" svc/${{ inputs.slug }} 19891:3000 &
+          PF_PID=$!
+          sleep 3
+          RESPONSE=$(curl -fsSk \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            --max-time 10 \
+            http://127.0.0.1:19891${{ inputs.basePath }}/api/version)
+          kill $PF_PID 2>/dev/null || true
+          echo "Response: $RESPONSE"
+          EXPECTED_VER="${{ needs.build.outputs.version }}"
+          python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          got = data.get('version', '')
+          expected = '$EXPECTED_VER'
+          assert got == expected, f'Version mismatch: got={got!r} expected={expected!r}'
+          env = data.get('environment', '')
+          assert env == 'test', f'Expected environment=test, got={env!r}'
+          print(f'PASS: /api/version returned version={got!r} environment={env!r}')
           " <<< "$RESPONSE"
 
       - name: Debug pod status (always)

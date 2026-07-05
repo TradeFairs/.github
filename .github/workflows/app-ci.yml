@@ -41,6 +41,15 @@ on:
         description: 'Hardcoded-basePath-literal guard: standard | off.'
         type: string
         default: standard
+      # ── Optional profile knobs (TD-224 / PLAN-131 / ADR-045) ─────────────────
+      buildVerify:
+        description: >-
+          Build the PR Docker image WITHOUT pushing to ghcr.io — compile/bundle
+          verification only, for apps without PR-image promotion (no deploy-test
+          to promote :pr-<sha> into; ADR-045 admin-prod-only profile, e.g.
+          bvv-test-admin). Default false = build AND push (today's behavior).
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -204,6 +213,7 @@ jobs:
           password: ${{ secrets.NPM_TOKEN }}
 
       - name: Build and push PR image
+        if: ${{ !inputs.buildVerify }}
         uses: docker/build-push-action@v7
         with:
           push: true
@@ -222,3 +232,26 @@ jobs:
           cache-to: |
             type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache,mode=max
             type=inline
+
+      - name: Build image (verify only, no push)
+        # buildVerify (TD-224, ADR-045 admin-prod-only): the Docker build is a
+        # compile/bundle check only — nothing is pushed to ghcr.io (no :pr-<sha>
+        # tag, no buildcache write; cache-from still READS the shared buildcache).
+        # Used by apps whose deploy-test is a stub, so there is no promotion to
+        # feed a PR image into.
+        if: inputs.buildVerify
+        uses: docker/build-push-action@v7
+        with:
+          push: false
+          secrets: |
+            NPM_TOKEN=${{ secrets.NPM_TOKEN }}
+          build-args: |
+            APP_BASE_PATH=${{ inputs.basePath }}
+            NEXT_PUBLIC_APP_BASE_PATH=${{ inputs.basePath }}
+            NEXT_PUBLIC_BVV_ENV=test
+            NEXT_PUBLIC_APP_VERSION=${{ steps.meta.outputs.version }}
+            APP_GIT_COMMIT=${{ github.event.pull_request.head.sha }}
+            APP_BUILD_TIME=1970-01-01T00:00:00Z
+          tags: |
+            ghcr.io/tradefairs/${{ inputs.slug }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache
