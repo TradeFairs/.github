@@ -62,29 +62,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Optional publish-order gate (opt-in via runReleaseOrder) ─────────────────
-  # Asserts every @tradefairs/* dep resolves to a published version (PLAN-063).
-  # Skipped when runReleaseOrder=false — a skipped job does not block `ci` (see
-  # the ci job's `if` guard below).
-  release-order:
-    if: inputs.runReleaseOrder
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          registry-url: https://npm.pkg.github.com
-          scope: '@tradefairs'
-      - run: bash .github/scripts/release-order.sh --check-only .
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
   ci:
-    needs: [release-order]
-    # Run after the (optional) gate: proceed when it passed OR was skipped
-    # (runReleaseOrder=false). Only a real release-order FAILURE blocks ci.
-    if: always() && (needs.release-order.result == 'success' || needs.release-order.result == 'skipped')
     runs-on: ubuntu-latest
 
     steps:
@@ -111,6 +89,18 @@ jobs:
           cache: pnpm
           registry-url: https://npm.pkg.github.com
           scope: '@tradefairs'
+
+      - name: Release-order gate
+        # Optional publish-order gate (opt-in via runReleaseOrder). Asserts every
+        # @tradefairs/* dep resolves to a published version (PLAN-063). Folded
+        # into this job as a step (TD-257) to reuse the checkout + setup-node
+        # above instead of paying a separate job's runner-boot/checkout/setup-node
+        # overhead on every CI run. A step failure fails `ci` directly — no
+        # needs/skipped-result juggling required.
+        if: inputs.runReleaseOrder
+        run: bash .github/scripts/release-order.sh --check-only .
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
