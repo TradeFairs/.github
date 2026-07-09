@@ -134,6 +134,7 @@ jobs:
           done
 
       - name: Cache Next.js build
+        id: nextjs-cache
         uses: actions/cache@v4
         with:
           path: |
@@ -142,6 +143,12 @@ jobs:
           key: ${{ runner.os }}-nextjs-${{ hashFiles('**/pnpm-lock.yaml') }}-${{ hashFiles('**/*.[jt]s', '**/*.[jt]sx') }}
           restore-keys: |
             ${{ runner.os }}-nextjs-${{ hashFiles('**/pnpm-lock.yaml') }}-
+
+      - name: Log Next.js cache hit
+        # TD-258 step 1 — instrumentation only. Surfaces cache-hit visibly in
+        # every future run's log so the fleet-wide hit-rate can be observed
+        # without a separate job. See TD-258 for the measurement + decision.
+        run: echo "cache-hit=${{ steps.nextjs-cache.outputs.cache-hit }}"
 
       - name: DB migrate
         # Opt-in; requires postgres != none. DATABASE_URL is scoped to THIS step
