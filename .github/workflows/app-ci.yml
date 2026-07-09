@@ -50,6 +50,20 @@ on:
           bvv-test-admin). Default false = build AND push (today's behavior).
         type: boolean
         default: false
+      draft:
+        description: >-
+          The calling PR's actual current draft state, passed explicitly by the
+          caller as github.event.pull_request.draft (literally, NOT wrapped in
+          ${ }) from ITS OWN top-level context (TD-260). Do not rely on this
+          reusable workflow re-reading
+          github.event.pull_request.draft itself under workflow_call — TD-243/
+          TD-260 found that field unreliable (type-fidelity gap) at this nested
+          call boundary, which silently broke build-image's draft-gate for every
+          PR fleet-wide from 2026-06-17 to 2026-07-09. No default: callers that
+          don't pass this explicitly get build-image treated as non-draft
+          (fail-open, consistent with ADR-034 "never fail closed" — better to
+          build an extra draft's image than to silently never build a real PR's).
+        type: boolean
 
 permissions:
   contents: read
@@ -168,7 +182,23 @@ jobs:
     # marked ready for review. Iterating in draft therefore costs no image builds;
     # deploy-test's promote-on-merge falls back to rebuild if no :pr-<sha> exists
     # (ADR-034 "never fail closed"). See AGENTS.md "GHA cost discipline".
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    #
+    # Gated on the explicit `draft` INPUT (see inputs.draft above), not on
+    # github.event.pull_request.draft read directly inside this reusable
+    # workflow. TD-243 (gis-dms) found the latter unconditionally skipped
+    # build-image for every PR fleet-wide since 2026-06-17 (commit 8c37c77d)
+    # regardless of true draft state, confirmed via `gh api` cross-referenced
+    # against real PR timelines. TD-260's local diagnostic (both a local-path
+    # and a true cross-repo `uses:`-ref act reproduction, matching production's
+    # exact call shape) reproduced a type-fidelity failure mode: comparing a
+    # non-boolean-typed `draft` value with `== false` permanently fails the
+    # AND-condition regardless of actual draft state — exactly TD-243's
+    # observed symptom. Reading `draft` through a strongly-typed
+    # `workflow_call` input (validated at the call boundary, from the
+    # caller's own reliable top-level context) sidesteps that class of bug
+    # entirely; the nested `github.event.pull_request.*` fields are not
+    # otherwise used for this gate.
+    if: inputs.draft == false
     needs: ci
     runs-on: ubuntu-latest
     permissions:
