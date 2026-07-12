@@ -64,6 +64,15 @@ on:
           (fail-open, consistent with ADR-034 "never fail closed" — better to
           build an extra draft's image than to silently never build a real PR's).
         type: boolean
+      ciRunsOn:
+        description: >-
+          JSON array (as a string) of runner labels for the `ci` and
+          `build-image` jobs, consumed via `fromJSON(inputs.ciRunsOn)`
+          (TD-273 / ADR-047 §C). Default is a no-op — every existing caller
+          keeps running on GitHub-hosted `ubuntu-latest` until it opts in
+          (e.g. '["self-hosted","liv26"]').
+        type: string
+        default: '"ubuntu-latest"'
 
 permissions:
   contents: read
@@ -77,7 +86,7 @@ concurrency:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.ciRunsOn) }}
 
     steps:
       - uses: actions/checkout@v5
@@ -200,7 +209,7 @@ jobs:
     # otherwise used for this gate.
     if: inputs.draft == false
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.ciRunsOn) }}
     permissions:
       contents: read
       packages: write

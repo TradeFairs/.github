@@ -45,6 +45,16 @@ on:
           never fails a release (see the step comment).
         type: boolean
         default: false
+      ciRunsOn:
+        description: >-
+          JSON array (as a string) of runner labels for the `release` job,
+          consumed via `fromJSON(inputs.ciRunsOn)` (TD-273 / ADR-047 §C).
+          Default is a no-op — every existing caller keeps releasing on
+          GitHub-hosted `ubuntu-latest` until it opts in (e.g.
+          '["self-hosted","liv26"]'). The `deploy-prod` job is unaffected —
+          it stays pinned to the literal `[self-hosted, liv11]` label.
+        type: string
+        default: '"ubuntu-latest"'
 
 permissions:
   contents: write
@@ -56,7 +66,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.ciRunsOn) }}
     timeout-minutes: 30
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}

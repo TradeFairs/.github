@@ -23,6 +23,16 @@ on:
           boundary, ADR-045 api-internal profile, e.g. bvv-directory-api).
         type: string
         default: ingress
+      ciRunsOn:
+        description: >-
+          JSON array (as a string) of runner labels for the `build` job,
+          consumed via `fromJSON(inputs.ciRunsOn)` (TD-273 / ADR-047 §C).
+          Default is a no-op — every existing caller keeps building on
+          GitHub-hosted `ubuntu-latest` until it opts in (e.g.
+          '["self-hosted","liv26"]'). The `deploy` job is unaffected — it
+          stays pinned to the literal `[self-hosted, liv11]` label.
+        type: string
+        default: '"ubuntu-latest"'
 
 concurrency:
   group: deploy-${{ inputs.slug }}
@@ -36,7 +46,7 @@ permissions:
 jobs:
   # ── 1. Build & push image ────────────────────────────────────────────────────
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.ciRunsOn) }}
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
     outputs:
