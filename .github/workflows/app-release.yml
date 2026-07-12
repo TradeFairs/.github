@@ -136,22 +136,35 @@ jobs:
           fi
           exit 0
 
-      - name: Compute buildx driver-opts (self-hosted proxy passthrough)
+      - name: Compute buildx driver-opts + build-args (self-hosted proxy passthrough)
         # TD-280: see app-ci.yml for the full rationale — the buildx
         # docker-container driver's builder doesn't inherit this job's proxy
         # env, so forward it dynamically (empty on ubuntu-latest, no-op there).
+        # TD-281: Dockerfile RUN steps (pnpm/npm install) need the same values
+        # as build-args instead (Docker's predefined ARGs — no Dockerfile
+        # `ARG` declaration needed).
         id: buildx_opts
         shell: bash
         run: |
-          # opts<<EOF/EOF below is safe only because HTTP_PROXY/HTTPS_PROXY
-          # are operator-set proxy URLs, never untrusted input.
+          # opts<<EOF/EOF and build_args<<EOF/EOF below are safe only because
+          # HTTP_PROXY/HTTPS_PROXY are operator-set proxy URLs, never
+          # untrusted input.
           {
             if [ -n "${HTTP_PROXY:-}" ]; then echo "env.HTTP_PROXY=${HTTP_PROXY}"; fi
             if [ -n "${HTTPS_PROXY:-}" ]; then echo "env.HTTPS_PROXY=${HTTPS_PROXY}"; fi
           } > /tmp/buildx-driver-opts.txt
           {
+            if [ -n "${HTTP_PROXY:-}" ]; then echo "HTTP_PROXY=${HTTP_PROXY}"; fi
+            if [ -n "${HTTPS_PROXY:-}" ]; then echo "HTTPS_PROXY=${HTTPS_PROXY}"; fi
+          } > /tmp/buildx-build-args.txt
+          {
             echo 'opts<<EOF'
             cat /tmp/buildx-driver-opts.txt
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo 'build_args<<EOF'
+            cat /tmp/buildx-build-args.txt
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -190,6 +203,7 @@ jobs:
             NEXT_PUBLIC_APP_VERSION=${{ inputs.releaseVersion }}
             APP_GIT_COMMIT=${{ github.sha }}
             APP_BUILD_TIME=${{ fromJSON(toJSON(github.event.repository.updated_at)) }}
+            ${{ steps.buildx_opts.outputs.build_args }}
           tags: |
             ${{ env.IMAGE }}:${{ inputs.releaseVersion }}
             ${{ env.IMAGE }}:latest
