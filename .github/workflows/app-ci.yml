@@ -236,6 +236,10 @@ jobs:
         id: buildx_opts
         shell: bash
         run: |
+          # The opts<<EOF/EOF GITHUB_OUTPUT heredoc below is safe only because
+          # HTTP_PROXY/HTTPS_PROXY are operator-set proxy URLs, never
+          # untrusted/user-controlled input — a value containing a bare `EOF`
+          # line would terminate the heredoc early.
           {
             if [ -n "${HTTP_PROXY:-}" ]; then echo "env.HTTP_PROXY=${HTTP_PROXY}"; fi
             if [ -n "${HTTPS_PROXY:-}" ]; then echo "env.HTTPS_PROXY=${HTTPS_PROXY}"; fi
