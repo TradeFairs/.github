@@ -109,7 +109,24 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: pnpm
+          # TD-287: on self-hosted liv26 the pnpm store already persists on
+          # the runner container's own writable layer across job runs (the
+          # container is restarted in-place, never recreated) — GHA's
+          # remote pnpm-cache upload/restore is pure redundant overhead
+          # there (verified: `/home/runner/.local/share/pnpm` survives
+          # across the container's ephemeral-per-job runner registrations,
+          # confirmed via RestartCount + unchanged container ID on liv26).
+          # `ubuntu-latest` keeps `cache: pnpm` unchanged — its runner VM
+          # is genuinely ephemeral per job with no local disk to persist.
+          # NOTE: condition is inverted (`!contains(...) && 'pnpm' || ''`)
+          # rather than `contains(...) && '' || 'pnpm'` — GHA expressions
+          # treat '' as falsy, so with the naive ordering the `&&` branch's
+          # '' result falls through the `||` and always yields 'pnpm'
+          # (classic JS ternary-via-&&/|| gotcha, confirmed empirically: a
+          # live self-hosted run with the naive expression still logged
+          # `cache: pnpm` and paid the full 4m Post Run cost). Putting the
+          # only-ever-empty-string branch on the `||` side avoids it.
+          cache: ${{ !contains(inputs.ciRunsOn, 'self-hosted') && 'pnpm' || '' }}
           registry-url: https://npm.pkg.github.com
           scope: '@tradefairs'
 
