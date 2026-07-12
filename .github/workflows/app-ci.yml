@@ -223,7 +223,36 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=pr-${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
 
+      - name: Compute buildx driver-opts (self-hosted proxy passthrough)
+        # TD-280: docker/setup-buildx-action's docker-container driver spawns
+        # an isolated builder container via the Docker API (not `docker run`),
+        # so it inherits neither ~/.docker/config.json proxies nor this job's
+        # own HTTP_PROXY/HTTPS_PROXY env — on a self-hosted runner behind a
+        # proxy (e.g. liv26/bvvproxy) the builder otherwise can't reach
+        # github.com/ghcr.io at all. Read proxy values dynamically from this
+        # runner's own environment (empty on ubuntu-latest -> empty
+        # driver-opts -> no behavior change there); never hardcode a specific
+        # proxy URL in this shared reusable workflow.
+        id: buildx_opts
+        shell: bash
+        run: |
+          # The opts<<EOF/EOF GITHUB_OUTPUT heredoc below is safe only because
+          # HTTP_PROXY/HTTPS_PROXY are operator-set proxy URLs, never
+          # untrusted/user-controlled input — a value containing a bare `EOF`
+          # line would terminate the heredoc early.
+          {
+            if [ -n "${HTTP_PROXY:-}" ]; then echo "env.HTTP_PROXY=${HTTP_PROXY}"; fi
+            if [ -n "${HTTPS_PROXY:-}" ]; then echo "env.HTTPS_PROXY=${HTTPS_PROXY}"; fi
+          } > /tmp/buildx-driver-opts.txt
+          {
+            echo 'opts<<EOF'
+            cat /tmp/buildx-driver-opts.txt
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: ${{ steps.buildx_opts.outputs.opts }}
 
       - uses: docker/login-action@v4
         with:
