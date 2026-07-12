@@ -240,6 +240,21 @@ jobs:
         # instead. These are Docker's "predefined ARGs": available in every
         # RUN step automatically once passed as --build-arg, with no `ARG`
         # declaration needed in the app's own Dockerfile.
+        #
+        # TD-282: docker/setup-buildx-action's default docker-container driver
+        # spawns a FRESH, throwaway builder container per job — its local
+        # BuildKit cache never persists across jobs/runners (confirmed: the
+        # pilot's 3 attempts each got a different random builder name, and a
+        # cold build took 15min on liv26 despite low CPU use, because the only
+        # cache path left was a slow registry round-trip through bvvproxy).
+        # On self-hosted (proxy set), force the classic `docker` driver
+        # instead — it's BuildKit embedded directly in the host dockerd, using
+        # its already-shared, already-proxy-configured (TD-272) image/layer
+        # store, so cache is genuinely shared across all runners and jobs
+        # (measured: repeat build of the same Dockerfile: minutes -> ~2s).
+        # `driver-opts` (TD-280) becomes a no-op on liv26 with this driver
+        # (classic driver spawns no new container to configure) but is kept
+        # for ubuntu-latest as a harmless, already-empty fallback.
         id: buildx_opts
         shell: bash
         run: |
@@ -265,10 +280,16 @@ jobs:
             cat /tmp/buildx-build-args.txt
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
+          if [ -n "${HTTP_PROXY:-}" ]; then
+            echo "driver=docker" >> "$GITHUB_OUTPUT"
+          else
+            echo "driver=" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/setup-buildx-action@v4
         with:
-          driver-opts: ${{ steps.buildx_opts.outputs.opts }}
+          driver: ${{ steps.buildx_opts.outputs.driver }}
+          driver-opts: ${{ steps.buildx_opts.outputs.driver == '' && steps.buildx_opts.outputs.opts || '' }}
 
       - uses: docker/login-action@v4
         with:
