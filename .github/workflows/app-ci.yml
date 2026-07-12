@@ -137,20 +137,34 @@ jobs:
         # and DB-gated suites (describeIfDb) skip (the prior inline-CI behavior).
         # Opt in via `dbTests: true` to export it globally and actually run those
         # suites in CI (requires dbMigrate so the schema exists).
+        #
+        # TD-283: container name and host port MUST be unique per run, not the
+        # fixed `ci-postgres`/`5432` this used to hardcode. That was safe on
+        # ubuntu-latest (one isolated VM per job) but collides the instant two
+        # DB-using apps run concurrently on the liv26 self-hosted fleet, where
+        # all 3 runners share one host Docker daemon (DooD) — confirmed live:
+        # "Conflict. The container name /ci-postgres is already in use", and a
+        # second job silently talking to the FIRST job's Postgres instance
+        # (wrong schema) when the name collision didn't hard-fail first.
         if: inputs.postgres != 'none'
+        id: postgres
         run: |
           IMAGE=postgres:17-alpine
           if [ "${{ inputs.postgres }}" = "pgvector" ]; then IMAGE=pgvector/pgvector:pg17; fi
-          docker run -d --name ci-postgres \
+          CONTAINER_NAME="ci-postgres-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "container_name=${CONTAINER_NAME}" >> "$GITHUB_OUTPUT"
+          docker run -d --name "$CONTAINER_NAME" \
             -e POSTGRES_USER="${{ inputs.slug }}" \
             -e POSTGRES_PASSWORD=dev \
             -e POSTGRES_DB="${{ inputs.slug }}" \
-            -p 5432:5432 "$IMAGE"
+            -p 0:5432 "$IMAGE"
+          PG_PORT=$(docker port "$CONTAINER_NAME" 5432/tcp | tail -1 | awk -F: '{print $NF}')
+          echo "port=${PG_PORT}" >> "$GITHUB_OUTPUT"
           if [ "${{ inputs.dbTests }}" = "true" ]; then
-            echo "DATABASE_URL=postgres://${{ inputs.slug }}:dev@localhost:5432/${{ inputs.slug }}" >> "$GITHUB_ENV"
+            echo "DATABASE_URL=postgres://${{ inputs.slug }}:dev@localhost:${PG_PORT}/${{ inputs.slug }}" >> "$GITHUB_ENV"
           fi
           for i in $(seq 1 30); do
-            if docker exec ci-postgres pg_isready -U "${{ inputs.slug }}" >/dev/null 2>&1; then
+            if docker exec "$CONTAINER_NAME" pg_isready -U "${{ inputs.slug }}" >/dev/null 2>&1; then
               echo "Postgres ready after ${i} attempt(s)"; break
             fi
             echo "Waiting for Postgres ($i/30)..."; sleep 2
@@ -162,7 +176,7 @@ jobs:
         if: inputs.dbMigrate
         run: pnpm db:migrate
         env:
-          DATABASE_URL: postgres://${{ inputs.slug }}:dev@localhost:5432/${{ inputs.slug }}
+          DATABASE_URL: postgres://${{ inputs.slug }}:dev@localhost:${{ steps.postgres.outputs.port }}/${{ inputs.slug }}
 
       - name: Lint
         run: pnpm lint
@@ -181,6 +195,14 @@ jobs:
             echo "::error::Hardcoded basePath literal found in src/. Use APP_BASE_PATH env per ADR-024."
             exit 1
           fi
+
+      - name: Stop Postgres
+        # TD-283: on a persistent shared host (liv26), a leftover ci-postgres-*
+        # container occupies a random host port and disk indefinitely unless
+        # explicitly removed here — unlike ubuntu-latest, where the whole VM
+        # (and any container in it) is discarded after the job regardless.
+        if: always() && inputs.postgres != 'none'
+        run: docker rm -f "${{ steps.postgres.outputs.container_name }}" 2>/dev/null || true
 
   # ── build-once-on-PR (ADR-034) ───────────────────────────────────────────────
   # On pull_request, build + push the production Docker image tagged by PR head
