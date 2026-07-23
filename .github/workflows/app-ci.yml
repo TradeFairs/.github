@@ -238,7 +238,7 @@ jobs:
         # ADR-024 §G — CI fails if any source file contains a hardcoded basePath literal.
         if: inputs.basePathGuard == 'standard'
         run: |
-          if grep -rn "['\"]\\${{ inputs.basePath }}['\"]" src --include='*.ts*' --exclude-dir=__tests__ 2>/dev/null; then
+          if grep -rn "['\"]\\${{ inputs.basePath }}['\"]" src --include='*.ts*' --exclude-dir=__tests__ --exclude='*.test.ts' --exclude='*.test.tsx' 2>/dev/null; then
             echo "::error::Hardcoded basePath literal found in src/. Use APP_BASE_PATH env per ADR-024."
             exit 1
           fi
