@@ -279,6 +279,14 @@ jobs:
     if: inputs.draft == false
     needs: ci
     runs-on: ${{ fromJSON(inputs.ciRunsOn) }}
+    # 2026-07-26 incident (service-desk PR #245, run 30210209077): the
+    # self-hosted runner self-updated mid-job and crash-looped for ~19min
+    # (13 Listener restarts across all 3 liv26 runners), orphaning this
+    # job's completion report to GitHub even though the actual Docker build
+    # had already finished. With no timeout-minutes, the run sat shown as
+    # in_progress for ~2h instead of failing fast. A real build+push here
+    # takes ~1-2min; 15min matches the sibling `ci` job's budget.
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
