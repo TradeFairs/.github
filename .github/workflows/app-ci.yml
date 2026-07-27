@@ -375,6 +375,19 @@ jobs:
           password: ${{ secrets.NPM_TOKEN }}
 
       - name: Build and push PR image
+        # TD-294: cache-from/cache-to's `type=registry,...` target is a
+        # separate mechanism from TD-282's classic-driver local BuildKit
+        # cache — on self-hosted (liv26) the local daemon cache (TD-282)
+        # already makes layers CACHED, so the registry round-trip
+        # (ghcr.io import + mode=max export, ~48s/job measured) is pure
+        # redundant overhead. Conditioned off for self-hosted only, same
+        # `${{ !contains(inputs.ciRunsOn, 'self-hosted') && <value> || '' }}`
+        # formula (and `&&`/`||` falsy-`''`-on-the-left gotcha avoidance) as
+        # TD-287's `cache: pnpm` fix — `ubuntu-latest` is unaffected (still
+        # gets the full registry cache-from/cache-to, its only cross-job
+        # cache path on an ephemeral VM). `type=inline` cache-to target is
+        # cheap (embeds cache metadata in the pushed image manifest, no
+        # separate registry round-trip) and stays unconditional for both.
         if: ${{ !inputs.buildVerify }}
         uses: docker/build-push-action@v7
         with:
@@ -391,15 +404,17 @@ jobs:
             ${{ steps.buildx_opts.outputs.build_args }}
           tags: |
             ghcr.io/tradefairs/${{ inputs.slug }}:${{ steps.meta.outputs.tag }}
-          cache-from: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache
+          cache-from: ${{ !contains(inputs.ciRunsOn, 'self-hosted') && format('type=registry,ref=ghcr.io/tradefairs/{0}:buildcache', inputs.slug) || '' }}
           cache-to: |
-            type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache,mode=max
+            ${{ !contains(inputs.ciRunsOn, 'self-hosted') && format('type=registry,ref=ghcr.io/tradefairs/{0}:buildcache,mode=max', inputs.slug) || '' }}
             type=inline
 
       - name: Build image (verify only, no push)
         # buildVerify (TD-224, ADR-045 admin-prod-only): the Docker build is a
         # compile/bundle check only — nothing is pushed to ghcr.io (no :pr-<sha>
-        # tag, no buildcache write; cache-from still READS the shared buildcache).
+        # tag, no buildcache write; cache-from still READS the shared buildcache
+        # on ubuntu-latest; on self-hosted cache-from is conditioned off per
+        # TD-294, see "Build and push PR image" above — same formula).
         # Used by apps whose deploy-test is a stub, so there is no promotion to
         # feed a PR image into.
         if: inputs.buildVerify
@@ -418,4 +433,4 @@ jobs:
             ${{ steps.buildx_opts.outputs.build_args }}
           tags: |
             ghcr.io/tradefairs/${{ inputs.slug }}:${{ steps.meta.outputs.tag }}
-          cache-from: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache
+          cache-from: ${{ !contains(inputs.ciRunsOn, 'self-hosted') && format('type=registry,ref=ghcr.io/tradefairs/{0}:buildcache', inputs.slug) || '' }}
