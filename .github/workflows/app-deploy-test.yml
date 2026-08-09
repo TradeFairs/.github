@@ -33,6 +33,18 @@ on:
           stays pinned to the literal `[self-hosted, liv11]` label.
         type: string
         default: '"ubuntu-latest"'
+      appPath:
+        description: >-
+          Monorepo-relative path (e.g. `apps/<slug>`) to read the version for
+          the image tag / smoke assertion from, instead of the repo-root
+          `package.json` (TD-625 / ADR-071 §12.1 — the monorepo root version
+          has no meaning and nothing may be derived from it). Default is a
+          no-op empty string: every existing standalone-repo caller keeps
+          reading its own repo-root `package.json` unchanged (Acceptance
+          Criterion 6) until it opts in from inside the future consolidated
+          `bvv-platform` monorepo (ADR-071 step 4+, not in scope here).
+        type: string
+        default: ''
 
 concurrency:
   group: deploy-${{ inputs.slug }}
@@ -140,8 +152,20 @@ jobs:
 
       - name: Read version from package.json
         id: version
+        env:
+          APP_PATH: ${{ inputs.appPath }}
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          # TD-625 / ADR-071 §12.1: when appPath is set (future monorepo caller only —
+          # every one of today's 13 standalone-repo callers leaves it unset), read the
+          # version from apps/<slug>/package.json instead of the repo-root package.json;
+          # the monorepo root version has no meaning and nothing may be derived from it.
+          # Default (empty APP_PATH) preserves today's exact repo-root-relative command
+          # unchanged, so this branch is a no-op for all existing callers.
+          if [ -n "$APP_PATH" ]; then
+            VERSION=$(node -p "require('./${APP_PATH}/package.json').version")
+          else
+            VERSION=$(node -p "require('./package.json').version")
+          fi
           # Pre-flight: main must always be in SNAPSHOT state (ADR-023 §B.2).
           if [[ "$VERSION" != *-SNAPSHOT ]]; then
             echo "::error::package.json version '$VERSION' does not end with -SNAPSHOT."
