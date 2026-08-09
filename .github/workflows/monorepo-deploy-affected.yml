@@ -1,0 +1,65 @@
+# monorepo-deploy-affected.yml — TD-625 (ADR-071 §9 requirement #2, step 1b).
+#
+# Deploy-affected-detection is a SEPARATE mechanism from CI-affected-detection (TD-621/622,
+# the orchestrator's task graph): CI-affected only runs inside a single PR's build/test/lint
+# jobs and has no concept of `apps/*` at all. The deploy trigger is `push: main` -> image
+# build -> image tag -> `kustomize edit set image` -> rollout, and today's 13 standalone-repo
+# callers each invoke app-deploy-test.yml directly with a hardcoded single `slug` — there is
+# no fan-out mechanism, because there is only ever one app per repo today.
+#
+# This workflow is the fan-out: given a set of `apps/<slug>` selected by
+# `bvv-platform/scripts/deploy-affected.mjs` (graph-walk over `packages/* -> apps/*`
+# `workspace:*` dependencies, NOT a `paths:` include filter — see that script's header
+# comment and ADR-071 §9 for why `paths:` is explicitly forbidden as the selection
+# mechanism), deploy each selected app via a `strategy.matrix` over the existing, unmodified
+# `app-deploy-test.yml` reusable job.
+#
+# Not wired to fire automatically anywhere yet — it exists as new, opt-in infrastructure a
+# future `bvv-platform` monorepo caller (ADR-071 step 4+, out of scope for this TD) will
+# invoke once `apps/<slug>` actually exists. None of today's 13 standalone-repo
+# `deploy-test.yml` callers reference this file, so it has zero effect on their behavior
+# (Acceptance Criterion 6).
+name: Monorepo deploy-affected (reusable, opt-in)
+
+on:
+  workflow_call:
+    inputs:
+      slugs:
+        description: >-
+          JSON array (as a string) of `apps/<slug>` names to deploy, e.g.
+          '["settings-app","rich-text-app"]' — the output of
+          `node scripts/deploy-affected.mjs --json` in the calling monorepo.
+          Consumed via `fromJSON(inputs.slugs)` for `strategy.matrix.slug`,
+          same convention as `ciRunsOn` (see app-deploy-test.yml).
+        required: true
+        type: string
+      basePathPrefix:
+        description: >-
+          Base path prefix each app is served under, e.g. '/'. Combined with
+          each matrix `slug` to form that app's `basePath` input
+          (`${basePathPrefix}${slug}`) passed through to app-deploy-test.yml.
+        required: true
+        type: string
+      smokeMode:
+        description: 'Forwarded to app-deploy-test.yml (see that workflow for values/default).'
+        type: string
+        default: ingress
+      ciRunsOn:
+        description: 'Forwarded to app-deploy-test.yml (see that workflow for values/default).'
+        type: string
+        default: '"ubuntu-latest"'
+
+jobs:
+  deploy-affected:
+    strategy:
+      fail-fast: false
+      matrix:
+        slug: ${{ fromJSON(inputs.slugs) }}
+    uses: ./.github/workflows/app-deploy-test.yml
+    with:
+      slug: ${{ matrix.slug }}
+      basePath: ${{ inputs.basePathPrefix }}${{ matrix.slug }}
+      appPath: apps/${{ matrix.slug }}
+      smokeMode: ${{ inputs.smokeMode }}
+      ciRunsOn: ${{ inputs.ciRunsOn }}
+    secrets: inherit
