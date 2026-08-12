@@ -25,6 +25,23 @@
 # commit SHA for now. See TD-712 Retrospective for the follow-up on whether
 # k8s-workspace should start tagging this script the same way.
 #
+# --- Cross-repo checkout auth (k8s-workspace TD-728) ---
+#
+# The sparse checkout of `TradeFairs/k8s-workspace` below is a DIFFERENT
+# private repo from the calling repo, so the default `GITHUB_TOKEN` (scoped
+# only to the calling repo) cannot read it — `actions/checkout@v5` fails with
+# `fatal: repository ... not found` before the gate script ever runs (found
+# live via k8s-workspace:TD-722's Step 6/7 live-fire test on `bvv-platform`,
+# fixed by k8s-workspace:TD-728). `workflow_call:` therefore declares a
+# required `NPM_TOKEN` secret input and passes it as `token:` on that
+# checkout step. Every caller of this reusable workflow MUST forward it —
+# `secrets: inherit` on the caller's `uses:` block is the simplest way,
+# since `NPM_TOKEN` already lives on each caller repo for this exact
+# cross-repo-checkout purpose (see `td-linkage-pr-gate.yml`'s and
+# `air-declaration-audit.yml`'s identical prior-art pattern in
+# `bvv-platform`, PLAN-140 fleet convention #1). A caller that omits
+# `secrets:`/`secrets: inherit` will fail this same checkout step.
+#
 # --- Base/head computation matches the k8s-workspace-local workflow ---
 #
 # Same logic as k8s-workspace's own `.github/workflows/adr073-verdict-gate.yml`
@@ -39,7 +56,15 @@
 name: App ADR-073 Verdict Gate (reusable)
 
 on:
-  workflow_call: {}
+  workflow_call:
+    secrets:
+      NPM_TOKEN:
+        required: true
+        description: >-
+          Cross-repo-scoped PAT used to check out the private
+          TradeFairs/k8s-workspace repo (gate script source). Must be
+          forwarded by the caller via `secrets: inherit` (or an explicit
+          `NPM_TOKEN: ${{ secrets.NPM_TOKEN }}` pass-through).
 
 permissions:
   contents: read
@@ -66,6 +91,7 @@ jobs:
         with:
           repository: TradeFairs/k8s-workspace
           ref: 5670dfdd2d69d796a417a1acba68bbeadded6bc9
+          token: ${{ secrets.NPM_TOKEN }}
           sparse-checkout: |
             bin/preflight-checks-adr073-verdict.py
           sparse-checkout-cone-mode: false
