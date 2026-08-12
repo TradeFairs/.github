@@ -65,7 +65,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: TradeFairs/k8s-workspace
-          ref: b10e0bc5e8f27f2cc1eb099ef128fc765724b875
+          ref: 5670dfdd2d69d796a417a1acba68bbeadded6bc9
           sparse-checkout: |
             bin/preflight-checks-adr073-verdict.py
           sparse-checkout-cone-mode: false
