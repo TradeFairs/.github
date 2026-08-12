@@ -1,0 +1,81 @@
+# app-adr073-verdict-gate-v2.yml — TD-730 diagnostic probe, NEW PATH.
+#
+# This is a byte-functional copy of app-adr073-verdict-gate.yml at a
+# never-before-used filename, created and merged directly to `main` as a
+# deliberate isolation experiment (k8s-workspace:TD-730). See that TD's
+# Context for the full reasoning: app-adr073-verdict-gate.yml (this file's
+# sibling, same repo, same `workflow_call` shape) fails with ZERO jobs
+# scheduled when called cross-org from bvv-platform, even after a
+# delete-and-re-add (TD-729, PR #19) intended to force a fresh GitHub
+# Actions workflow registration. This probe tests whether the defect is
+# specific to that file's OWN path/registration history, or whether ANY
+# workflow_call-with-required-secrets file merged to `main` in this repo
+# exhibits the same symptom.
+#
+# If this file schedules a real job when called cross-org (same caller
+# shape, same NPM_TOKEN secret contract) while app-adr073-verdict-gate.yml
+# continues to fail — that is strong evidence the defect is tied
+# specifically to app-adr073-verdict-gate.yml's own per-path registration
+# state (workflow_id 332779147), not a repo-wide or content-shape cause.
+#
+# DIAGNOSTIC ONLY — not intended as a long-term caller target. If this
+# probe resolves the mystery, the real fix (e.g. permanently renaming
+# app-adr073-verdict-gate.yml, or another mechanism TD-730 identifies) is
+# a separate follow-up TD's scope, not this file's own promotion to
+# production use.
+
+name: App ADR-073 Verdict Gate v2 (TD-730 new-path probe)
+
+on:
+  workflow_call:
+    secrets:
+      NPM_TOKEN:
+        required: true
+        description: >-
+          Cross-repo-scoped PAT used to check out the private
+          TradeFairs/k8s-workspace repo (gate script source). Must be
+          forwarded by the caller via `secrets: inherit` (or an explicit
+          `NPM_TOKEN: ${{ secrets.NPM_TOKEN }}` pass-through).
+
+permissions:
+  contents: read
+
+jobs:
+  adr073-verdict-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch ADR-073 verdict-gate script from k8s-workspace (pinned)
+        uses: actions/checkout@v5
+        with:
+          repository: TradeFairs/k8s-workspace
+          ref: 5670dfdd2d69d796a417a1acba68bbeadded6bc9
+          token: ${{ secrets.NPM_TOKEN }}
+          sparse-checkout: |
+            bin/preflight-checks-adr073-verdict.py
+          sparse-checkout-cone-mode: false
+          path: _adr073-gate-script
+
+      - name: Compute base/head refs for the diff
+        id: refs
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.after }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run ADR-073 verdict gate (steady mode)
+        env:
+          ADR073_GATE_MODE: steady
+          PREFLIGHT_ADR073_VERDICT: error
+        run: |
+          python3 _adr073-gate-script/bin/preflight-checks-adr073-verdict.py . \
+            --base "${{ steps.refs.outputs.base }}" \
+            --head "${{ steps.refs.outputs.head }}"
