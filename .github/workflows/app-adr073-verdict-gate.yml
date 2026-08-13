@@ -64,7 +64,7 @@ on:
           Cross-repo-scoped PAT used to check out the private
           TradeFairs/k8s-workspace repo (gate script source). Must be
           forwarded by the caller via `secrets: inherit` (or an explicit
-          `NPM_TOKEN: ${{ secrets.NPM_TOKEN }}` pass-through).
+          `NPM_TOKEN:` pass-through of the caller's own NPM_TOKEN secret).
 
 permissions:
   contents: read
