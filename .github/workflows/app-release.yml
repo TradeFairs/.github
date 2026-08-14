@@ -303,8 +303,136 @@ jobs:
           git add "$PKG_JSON"
           git commit -m "chore(release): bump to ${{ inputs.nextVersion }}-SNAPSHOT"
 
-      - name: Push commits and tag
-        run: git push origin HEAD:main "$RELEASE_TAG"
+      - name: Push tag (unaffected by branch protection)
+        # k8s-workspace:TD-825, Candidate 2: the tag targets refs/tags/..., a
+        # different ref namespace from refs/heads/main, so it is not subject
+        # to bvv-platform/main's branch protection at all. Pushed alone and
+        # first so the release artifact (this tag + the image already pushed
+        # above) lands even if the branch-push/PR path below is slow — the
+        # tag object was already created locally by "Bump to release
+        # version" and is pushed byte-identical to before, just as its own
+        # `git push` instead of sharing a line with the branch push.
+        run: git push origin "$RELEASE_TAG"
+
+      - name: Open release-bump PR
+        # k8s-workspace:TD-825, Candidate 1: bvv-platform/main requires the
+        # td-linkage-pr-gate status check, which triggers ONLY on
+        # `pull_request` (opened/synchronize/reopened/edited) — a direct
+        # `git push origin HEAD:main` can never produce that event, so it is
+        # unconditionally rejected (GH006) regardless of content. Route the
+        # two local bump commits through a real PR instead.
+        #
+        # Branch name includes slug + releaseVersion: unique per release
+        # (releaseVersion is already guaranteed unique by the pre-flight
+        # SNAPSHOT check above), so concurrent/sequential releases of
+        # different apps (or re-releases after a fixed SNAPSHOT) never
+        # collide on the branch name.
+        #
+        # `NPM_TOKEN`, NOT `secrets.GITHUB_TOKEN`: GitHub does not fire
+        # `pull_request`-triggered workflows for PRs authored by the
+        # default `GITHUB_TOKEN` (recursion-prevention rule) — this is not
+        # a theory, it is the exact, already-documented reason
+        # `regen-python-client.yml` (bvv-platform) uses `REGEN_PR_TOKEN`
+        # instead of `GITHUB_TOKEN` to author its auto-PR (TD-116, PR #74:
+        # a GITHUB_TOKEN-authored PR got no CI checks at all). `NPM_TOKEN`
+        # is already this fleet's standing PAT, already present in every
+        # caller repo, already used elsewhere in this same job (ghcr
+        # login, buildx secret) — reused here for the same reason, not a
+        # new credential.
+        id: bump_pr
+        env:
+          GH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          BUMP_BRANCH="release/${{ inputs.slug }}-${{ inputs.releaseVersion }}"
+          git push origin "HEAD:refs/heads/$BUMP_BRANCH"
+
+          # td-linkage-pr-gate --gate-pr reads THIS PR's own body for a
+          # `TD:` line — it would otherwise fail the very check this PR
+          # exists to satisfy. TD-825 is the fix that routes the release
+          # ceremony through this PR at all, so it is the correct citation
+          # here (not the per-app release TD, which is the ceremony this
+          # workflow always performs).
+          PR_URL=$(gh pr create \
+            --repo "${{ github.repository }}" \
+            --base main \
+            --head "$BUMP_BRANCH" \
+            --title "chore(release): ${{ inputs.slug }} v${{ inputs.releaseVersion }}" \
+            --body "Automated release-bump PR opened by \`app-release.yml\` (k8s-workspace:TD-825) for \`${{ inputs.slug }}\` v${{ inputs.releaseVersion }} -> ${{ inputs.nextVersion }}-SNAPSHOT.
+
+          TD: TradeFairs/k8s-workspace:TD-825")
+          echo "pr-url=$PR_URL" >> "$GITHUB_OUTPUT"
+          PR_NUMBER="${PR_URL##*/}"
+          echo "pr-number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Opened release-bump PR: $PR_URL"
+
+      - name: Wait for td-linkage-pr-gate and merge release-bump PR
+        # Poll rather than assume synchronous completion — the gate is a
+        # real CI job (observed couple-minutes range elsewhere in the
+        # fleet), not an instant check. Fail the job LOUDLY (non-zero
+        # exit) on any failure/timeout rather than silently skipping
+        # deploy-prod — a release failure must be visible, never a quiet
+        # no-op (k8s-workspace:TD-825 Step 1e).
+        #
+        # Plain merge commit (`--merge`, not `--squash`): squash-merging
+        # rewrites the commit SHA, which would force re-deriving the
+        # actual merged SHA before the tag (already pushed above, against
+        # the PRE-merge commit) can be trusted to match `main` — the exact
+        # ordering mistake documented from TD-820's human-gate merge. A
+        # plain merge/fast-forward keeps the bump commit's SHA identical
+        # pre- and post-merge, so the re-diff below is a confirmation, not
+        # a re-tagging operation.
+        env:
+          GH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PR_NUMBER="${{ steps.bump_pr.outputs.pr-number }}"
+          PR_URL="${{ steps.bump_pr.outputs.pr-url }}"
+
+          echo "Waiting for td-linkage-pr-gate to report a conclusion on PR #$PR_NUMBER..."
+          BUCKET=""
+          for i in $(seq 1 60); do
+            BUCKET=$(gh pr checks "$PR_NUMBER" --repo "${{ github.repository }}" --json name,bucket \
+              --jq '.[] | select(.name == "td-linkage-pr-gate") | .bucket' 2>/dev/null || true)
+            if [ "$BUCKET" = "pass" ]; then
+              echo "td-linkage-pr-gate: pass"
+              break
+            elif [ "$BUCKET" = "fail" ] || [ "$BUCKET" = "cancel" ]; then
+              echo "::error::td-linkage-pr-gate reported bucket='$BUCKET' on release-bump PR #$PR_NUMBER ($PR_URL) — refusing to merge. This must be a visible release failure, not a silent skip."
+              exit 1
+            fi
+            echo "Attempt $i/60: gate bucket='${BUCKET:-pending}', waiting 10s..."
+            sleep 10
+          done
+          if [ "$BUCKET" != "pass" ]; then
+            echo "::error::td-linkage-pr-gate did not reach a passing bucket on PR #$PR_NUMBER ($PR_URL) within the poll window (bucket='${BUCKET:-pending}') — refusing to merge."
+            exit 1
+          fi
+
+          if ! gh pr merge "$PR_NUMBER" --repo "${{ github.repository }}" --merge --delete-branch; then
+            echo "::error::Failed to merge release-bump PR #$PR_NUMBER ($PR_URL) — refusing to continue silently."
+            exit 1
+          fi
+
+          # Re-derive the actual merged SHA rather than assuming the
+          # pre-merge branch tip landed unchanged (k8s-workspace:TD-820
+          # lesson, re-applied here even though a plain merge is expected
+          # to preserve the bump commit's SHA — verify, don't assume).
+          for i in $(seq 1 30); do
+            MERGE_COMMIT=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json mergeCommit --jq '.mergeCommit.oid // empty' 2>/dev/null || true)
+            [ -n "$MERGE_COMMIT" ] && break
+            echo "Waiting for merge commit SHA to be reported (attempt $i/30)..."
+            sleep 5
+          done
+          if [ -z "$MERGE_COMMIT" ]; then
+            echo "::error::Could not resolve the merged SHA for PR #$PR_NUMBER ($PR_URL) after merge — refusing to proceed without confirming what actually landed on main."
+            exit 1
+          fi
+          echo "Merged release-bump PR #$PR_NUMBER at $MERGE_COMMIT"
+
+          MAIN_SHA=$(git ls-remote origin refs/heads/main | cut -f1)
+          echo "origin/main is now at $MAIN_SHA"
+          if [ "$MAIN_SHA" != "$MERGE_COMMIT" ]; then
+            echo "::warning::origin/main ($MAIN_SHA) has moved past the merge commit ($MERGE_COMMIT) — another push landed concurrently. The release bump itself is still on main (verified via the PR's merge commit), this is only informational."
+          fi
 
       - name: Create GitHub Release
         run: |
