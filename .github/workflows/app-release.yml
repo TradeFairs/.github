@@ -392,8 +392,29 @@ jobs:
         # PLAN-047: direct ctr pull from ghcr.io — bypasses docker save/import pipe,
         # containerd fetches only missing layers via layer dedup (~17-25× faster).
         run: |
+          # TD-817 (k8s-workspace:TD-817): pull with `NPM_TOKEN`, NOT
+          # `GITHUB_TOKEN` — the prod twin of the fix TD-822
+          # (k8s-workspace:TD-822) already applied to app-deploy-test.yml's
+          # identical step.
+          #
+          # `GITHUB_TOKEN` is scoped to the repository the run lives in. Every
+          # ghcr package here is owned by the org but *linked* to a repo, and
+          # that link is what a repo-scoped token is checked against: 6
+          # packages (service-desk, service-catalog, dovolenky,
+          # bvv-directory-api, jira-status, jira-status-web) are `private`
+          # and linked to their own (still-existing) source repo, so a run in
+          # `bvv-platform` carries a `GITHUB_TOKEN` with no permission on
+          # them (measured on the test path, run 31823926618: `403
+          # Forbidden`) — the same registry-auth shape applies here because
+          # this step is byte-identical modulo the credential.
+          #
+          # `NPM_TOKEN` is org-scoped, exists in all caller repos, and is
+          # already the fleet's ghcr credential everywhere else in this same
+          # workflow (L235, L277). It is also already placed on this runner
+          # by the `git config --global` url-rewrite a few steps below
+          # (L448), so using it here adds no new secret exposure.
           sudo k3s ctr -n k8s.io images pull \
-            --user "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            --user "${{ github.actor }}:${{ secrets.NPM_TOKEN }}" \
             "$IMAGE:$IMAGE_TAG"
           echo "Pulled into k3s containerd:"
           sudo k3s ctr -n k8s.io images ls -q | grep "${{ inputs.slug }}" | head -5
