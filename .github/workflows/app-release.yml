@@ -253,20 +253,24 @@ jobs:
       - name: Build and push prod image
         uses: docker/build-push-action@v7
         with:
-          # TD-821: build context / Dockerfile follow `appPath`. Both inputs are
-          # PROVEN no-ops when empty, in the action's own source (v7 =
-          # docker/build-push-action src/context.ts): `context` is
-          # `getInput('context') || defaultContext`, so an empty string falls
-          # back to exactly today's default context; `file` is emitted only
-          # under `if (inputs.file)`, so an empty string appends no `--file`
-          # flag at all. Every existing standalone-repo caller (13 of them,
-          # none passing `appPath`) therefore runs the byte-identical buildx
-          # command it runs today. A monorepo caller passing
-          # `appPath: apps/<slug>` gets `context: apps/<slug>` +
-          # `file: apps/<slug>/Dockerfile` (ADR-071 §12.1) — the exact failure
-          # measured in `deploy-affected.yml`: `failed to read dockerfile:
-          # open Dockerfile: no such file or directory`.
-          context: ${{ inputs.appPath }}
+          # TD-821: the DOCKERFILE follows `appPath`; the BUILD CONTEXT does not
+          # and must stay the repo root. This asymmetry is measured, not assumed:
+          # every one of the 13 apps' Dockerfiles is written root-context-relative
+          # (54 `COPY packages/<pkg>/package.json`, `COPY apps/<slug>/…` and
+          # `COPY pnpm-workspace.yaml` lines apiece — the pnpm workspace siblings
+          # live OUTSIDE `apps/<slug>`). Narrowing the context to `apps/<slug>`
+          # was tried in v2.4.0 and fails at `COPY`:
+          #   failed to calculate checksum of ref …: "/packages/ui/package.json": not found
+          # (`bvv-platform` run 31822241715). So only `file:` is threaded.
+          #
+          # `file` is a PROVEN no-op when empty, in the action's own source
+          # (v7 = docker/build-push-action src/context.ts): it is emitted only
+          # under `if (inputs.file)`, so an empty string appends no `--file` flag
+          # at all, and `action.yml` gives it no default. Every existing
+          # standalone-repo caller (13 of them, none passing `appPath`) therefore
+          # runs the byte-identical buildx command it runs today. `context:` is
+          # deliberately NOT set — today's default context is already correct for
+          # both the standalone and the monorepo case.
           file: ${{ inputs.appPath != '' && format('{0}/Dockerfile', inputs.appPath) || '' }}
           push: true
           secrets: |
