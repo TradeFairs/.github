@@ -45,6 +45,32 @@ on:
           never fails a release (see the step comment).
         type: boolean
         default: false
+      appPath:
+        description: >-
+          Monorepo-relative path (e.g. `apps/<slug>`) to the app's own
+          `package.json`, used instead of the repo-root one for the pre-flight
+          SNAPSHOT check and for both version rewrites (TD-820, mirroring
+          `app-deploy-test.yml`'s input of the same name — TD-625 / ADR-071
+          §12.1: the monorepo root version has no meaning and nothing may be
+          derived from it). Default is a no-op empty string: every existing
+          standalone-repo caller keeps reading and writing its own repo-root
+          `package.json` unchanged until it opts in from inside the future
+          consolidated `bvv-platform` monorepo (ADR-071 step 4+, not in scope
+          here).
+        type: string
+        default: ''
+      tagPrefix:
+        description: >-
+          Prefix for the release tag, so a monorepo caller can tag
+          `app/<slug>@<version>` per ADR-071 §10 instead of a bare
+          `v<version>` in a tag namespace shared by 13 apps (TD-820; the
+          collision is measured — `v0.19.0` already exists as three different
+          commits across `service-desk`, `dovolenky` and `jira-status-web`).
+          Default is a no-op empty string: the tag stays exactly
+          `v<releaseVersion>` for every existing standalone-repo caller, at
+          tag creation, push, checkout and GitHub Release alike.
+        type: string
+        default: ''
       ciRunsOn:
         description: >-
           JSON array (as a string) of runner labels for the `release` job,
@@ -70,6 +96,16 @@ jobs:
     timeout-minutes: 30
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
+      # TD-820: the release tag. With the default empty `tagPrefix` this is the
+      # literal 'v' + releaseVersion — byte-identical to the previous hardcoded
+      # "v${{ inputs.releaseVersion }}" at every one of its uses (tag creation,
+      # push, GitHub Release, and the deploy-prod checkout ref). A monorepo
+      # caller passes e.g. `app/service-desk@` for ADR-071 §10 tags.
+      RELEASE_TAG: ${{ inputs.tagPrefix != '' && inputs.tagPrefix || 'v' }}${{ inputs.releaseVersion }}
+      # TD-820: repo-root-relative path to the app's package.json. Empty
+      # `appPath` yields the literal 'package.json' / './package.json' used
+      # today; a monorepo caller passes e.g. `apps/service-desk`.
+      APP_PATH: ${{ inputs.appPath }}
 
     steps:
       - uses: actions/checkout@v5
@@ -87,7 +123,17 @@ jobs:
         run: |
           RELEASE_VER="${{ inputs.releaseVersion }}"
           NEXT_VER="${{ inputs.nextVersion }}"
-          CURRENT_VER=$(node -p "require('./package.json').version")
+          # TD-820 / ADR-071 §12.1: when appPath is set (monorepo caller only —
+          # every one of today's 12 standalone-repo callers leaves it unset),
+          # read the version from apps/<slug>/package.json instead of the
+          # repo-root package.json; the monorepo root version has no meaning and
+          # nothing may be derived from it. The empty default takes the else
+          # branch, which is today's exact command unchanged.
+          if [ -n "$APP_PATH" ]; then
+            CURRENT_VER=$(node -p "require('./${APP_PATH}/package.json').version")
+          else
+            CURRENT_VER=$(node -p "require('./package.json').version")
+          fi
           echo "Current package.json version: $CURRENT_VER"
           echo "Release version requested:    $RELEASE_VER"
           echo "Next dev version:             $NEXT_VER"
@@ -190,15 +236,19 @@ jobs:
 
       - name: Bump to release version
         run: |
+          # TD-820: PKG_JSON is 'package.json' when appPath is unset (today's
+          # literal, for every existing standalone caller) and
+          # 'apps/<slug>/package.json' when a monorepo caller sets it.
+          PKG_JSON="${APP_PATH:+$APP_PATH/}package.json"
           node -e "
           const fs = require('fs');
-          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const pkg = JSON.parse(fs.readFileSync('$PKG_JSON', 'utf8'));
           pkg.version = '${{ inputs.releaseVersion }}';
-          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          fs.writeFileSync('$PKG_JSON', JSON.stringify(pkg, null, 2) + '\n');
           "
-          git add package.json
+          git add "$PKG_JSON"
           git commit -m "chore(release): v${{ inputs.releaseVersion }}"
-          git tag -a "v${{ inputs.releaseVersion }}" -m "Release ${{ inputs.releaseVersion }}"
+          git tag -a "$RELEASE_TAG" -m "Release ${{ inputs.releaseVersion }}"
 
       - name: Build and push prod image
         uses: docker/build-push-action@v7
@@ -222,23 +272,26 @@ jobs:
 
       - name: Bump to next SNAPSHOT
         run: |
+          # TD-820: same PKG_JSON resolution as the release bump above — the
+          # SNAPSHOT must be written back to the same file the pre-flight read.
+          PKG_JSON="${APP_PATH:+$APP_PATH/}package.json"
           node -e "
           const fs = require('fs');
-          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const pkg = JSON.parse(fs.readFileSync('$PKG_JSON', 'utf8'));
           pkg.version = '${{ inputs.nextVersion }}-SNAPSHOT';
-          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          fs.writeFileSync('$PKG_JSON', JSON.stringify(pkg, null, 2) + '\n');
           "
-          git add package.json
+          git add "$PKG_JSON"
           git commit -m "chore(release): bump to ${{ inputs.nextVersion }}-SNAPSHOT"
 
       - name: Push commits and tag
-        run: git push origin HEAD:main "v${{ inputs.releaseVersion }}"
+        run: git push origin HEAD:main "$RELEASE_TAG"
 
       - name: Create GitHub Release
         run: |
-          gh release create "v${{ inputs.releaseVersion }}" \
+          gh release create "$RELEASE_TAG" \
             --generate-notes \
-            --title "v${{ inputs.releaseVersion }}"
+            --title "$RELEASE_TAG"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -258,7 +311,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: v${{ inputs.releaseVersion }}  # the tag created by the release job
+          # TD-820: the tag created by the release job. Empty tagPrefix (every
+          # existing caller) yields 'v' + releaseVersion, i.e. today's literal.
+          ref: ${{ inputs.tagPrefix != '' && inputs.tagPrefix || 'v' }}${{ inputs.releaseVersion }}
 
       - name: Resolve prod namespace from overlay
         # The kustomize `namespace:` directive in overlays/prod is the canonical target
