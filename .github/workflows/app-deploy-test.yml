@@ -306,8 +306,45 @@ jobs:
 
       - name: Pull image into k3s containerd
         run: |
+          # TD-822: pull with `NPM_TOKEN`, NOT `GITHUB_TOKEN`.
+          #
+          # `GITHUB_TOKEN` is scoped to the repository the run lives in. Every
+          # ghcr package here is owned by the org but *linked* to a repo, and
+          # that link is what a repo-scoped token is checked against:
+          #   - 6 packages (service-desk, service-catalog, dovolenky,
+          #     bvv-directory-api, jira-status-web, jira-status) are `private`
+          #     and still linked to their old single-app source repo;
+          #   - 7 (bvv-test-admin, bvv-notification-hub, bvv-mcp-gateway,
+          #     bvv-platform-assistant, bvv-portal, gis-dms, bvv-directory-web)
+          #     are `internal` and linked to no repo at all.
+          # A run in `bvv-platform` therefore carries a `GITHUB_TOKEN` with no
+          # permission on the first 6 — measured 2026-08-14, run 31823926618:
+          #   ctr: failed to resolve image: unexpected status from HEAD request
+          #   to .../tradefairs/service-desk/manifests/...: 403 Forbidden
+          # while the `docker/login-action` PUSH in the build job of the SAME
+          # run succeeded, because that one already uses `NPM_TOKEN` (L123).
+          # Both sides use the identical `github.actor` username, so the actor
+          # is excluded as the cause — the token is the only varying term.
+          #
+          # `NPM_TOKEN` is org-scoped, exists in all 14 caller repos, and is
+          # already the fleet's ghcr credential everywhere else (app-ci.yml
+          # L374, this file L123). It is also already placed on THIS runner in
+          # THIS job by the `Apply manifests` step's `git config --global`
+          # url-rewrite, so using it here adds no new secret exposure — it
+          # removes an outlier instead. Standalone-repo callers are unaffected:
+          # they were passing only because their run happened to live in the
+          # package's linked repo, and `NPM_TOKEN` covers that case too.
+          #
+          # Rejected: making packages `public` (these are private business
+          # apps); relinking each package to `bvv-platform` (no REST field
+          # exists — `PATCH .../packages/container/<pkg>` 404s — and pushing
+          # from the monorepo does not relink, verified: service-desk was
+          # pushed from bvv-platform at 17:30 and stayed linked to
+          # `service-desk`, so it would mean delete+recreate on 6 live
+          # production images); flipping `private` → `internal` (widens read
+          # access to the whole org to work around a credential bug).
           sudo k3s ctr -n k8s.io images pull \
-            --user "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            --user "${{ github.actor }}:${{ secrets.NPM_TOKEN }}" \
             "$IMAGE:$IMAGE_TAG"
           echo "Pulled into k3s containerd:"
           sudo k3s ctr -n k8s.io images ls -q | grep "${{ inputs.slug }}" | head -5
