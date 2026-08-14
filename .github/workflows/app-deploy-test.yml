@@ -193,6 +193,20 @@ jobs:
         if: steps.pr_image.outputs.image_found != 'true'
         uses: docker/build-push-action@v7
         with:
+          # TD-821: build context / Dockerfile follow `appPath`. Both inputs are
+          # PROVEN no-ops when empty, in the action's own source (v7 =
+          # docker/build-push-action src/context.ts): `context` is
+          # `getInput('context') || defaultContext`, so an empty string falls
+          # back to exactly today's default context; `file` is emitted only
+          # under `if (inputs.file)`, so an empty string appends no `--file`
+          # flag at all. Every existing standalone-repo caller therefore runs
+          # the byte-identical buildx command it runs today. This is the fix for
+          # the live failure in `bvv-platform`'s `deploy-affected.yml`, which
+          # already passes `appPath: apps/<slug>` for 11 apps and whose every
+          # build job fails with `failed to read dockerfile: open Dockerfile:
+          # no such file or directory`.
+          context: ${{ inputs.appPath }}
+          file: ${{ inputs.appPath != '' && format('{0}/Dockerfile', inputs.appPath) || '' }}
           push: true
           secrets: |
             NPM_TOKEN=${{ secrets.NPM_TOKEN }}
@@ -223,6 +237,14 @@ jobs:
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
       IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+      # TD-821: `deploy` is a SEPARATE job from `build`, and `appPath` was so far
+      # only consumed by the build job's version step — hence re-declared here.
+      APP_PATH: ${{ inputs.appPath }}
+      # TD-821: repo-root-relative path to the app's `k8s/` directory. With the
+      # default empty `appPath` this is the literal 'k8s' used today at all
+      # test-overlay and job-migrate sites; a monorepo caller passing
+      # `apps/service-desk` gets 'apps/service-desk/k8s'.
+      K8S_DIR: ${{ inputs.appPath != '' && format('{0}/k8s', inputs.appPath) || 'k8s' }}
 
     steps:
       - uses: actions/checkout@v5
@@ -235,11 +257,23 @@ jobs:
         # must use the SAME namespace, not assume slug+"-test". Today every app's test
         # overlay happens to use `<slug>-test`, but deriving it removes that latent
         # assumption. Falls back to `<slug>-test` when the overlay omits `namespace:`.
+        #
+        # TD-821: the overlay path follows `appPath` via K8S_DIR (empty appPath
+        # → the literal `k8s/overlays/test/kustomization.yaml` read today).
+        # This is also the single place that validates `appPath` resolves: the
+        # test overlay is mandatory for every app, so if it is absent the path
+        # is wrong and the deploy must fail LOUDLY here rather than let `awk`
+        # return empty, silently fall back to `<slug>-test` and deploy an image
+        # into a namespace whose manifests were never rendered.
         run: |
-          NS=$(awk '/^namespace:[[:space:]]/{print $2; exit}' k8s/overlays/test/kustomization.yaml)
+          if [ ! -f "$K8S_DIR/overlays/test/kustomization.yaml" ]; then
+            echo "::error::$K8S_DIR/overlays/test/kustomization.yaml not found — appPath='${APP_PATH}' does not resolve to an app directory in this repo. Refusing to deploy."
+            exit 1
+          fi
+          NS=$(awk '/^namespace:[[:space:]]/{print $2; exit}' "$K8S_DIR/overlays/test/kustomization.yaml")
           NS=${NS:-${{ inputs.slug }}-test}
           echo "NS=$NS" >> "$GITHUB_ENV"
-          echo "Resolved test namespace from overlays/test: $NS"
+          echo "Resolved test namespace from $K8S_DIR/overlays/test: $NS"
 
       - name: Free Docker disk space
         run: sudo docker system prune -f
@@ -272,9 +306,27 @@ jobs:
 
       - name: Run DB migrations (pre-deploy Job)
         run: |
+          # TD-821: the skip below is only legitimate for a RESOLVED path. Before
+          # TD-821 the guard was a bare `[ ! -f k8s/job-migrate.yaml ]`, which at
+          # a monorepo repo root is ALWAYS true — so the 11 apps already calling
+          # this workflow with `appPath: apps/<slug>` from `deploy-affected.yml`
+          # would skip every migration silently and green. The two cases are now
+          # distinguishable:
+          #   - `$K8S_DIR` exists but has no `job-migrate.yaml` → genuinely
+          #     stateless app (6 of 13 have no migration manifest) → skip, as today.
+          #   - `$K8S_DIR` does not exist at all → `appPath` is unresolvable →
+          #     hard fail, never a green skip.
+          # With the default empty `appPath`, K8S_DIR is the literal `k8s` and
+          # this reduces to exactly today's two outcomes: single-app repos always
+          # have a `k8s/` directory (it is where the test overlay just read from,
+          # one step earlier), so the directory check cannot newly fail for them.
+          if [ ! -d "$K8S_DIR" ]; then
+            echo "::error::$K8S_DIR does not exist — appPath='${APP_PATH}' does not resolve to an app directory in this repo. Refusing to skip migrations silently."
+            exit 1
+          fi
           # Optional: stateless apps (e.g. bvv-directory-web) have no k8s/job-migrate.yaml.
-          if [ ! -f k8s/job-migrate.yaml ]; then
-            echo "::notice::k8s/job-migrate.yaml not present — stateless app, skipping migrations"
+          if [ ! -f "$K8S_DIR/job-migrate.yaml" ]; then
+            echo "::notice::$K8S_DIR/job-migrate.yaml not present — stateless app, skipping migrations"
             exit 0
           fi
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-12)
@@ -282,7 +334,7 @@ jobs:
           sudo kubectl -n "$NS" delete job "$JOB_NAME" --ignore-not-found
           # Strip any hardcoded `namespace:` from the manifest — applied with -n "$NS";
           # a stray (often stale prod) namespace line would conflict with the flag.
-          sed "s|__JOB_NAME__|${JOB_NAME}|g; s|__IMAGE_TAG__|${IMAGE_TAG}|g; s|name: ${{ inputs.slug }}-env|name: ${{ inputs.slug }}-env-test|g; /^[[:space:]]*namespace:[[:space:]]/d" k8s/job-migrate.yaml \
+          sed "s|__JOB_NAME__|${JOB_NAME}|g; s|__IMAGE_TAG__|${IMAGE_TAG}|g; s|name: ${{ inputs.slug }}-env|name: ${{ inputs.slug }}-env-test|g; /^[[:space:]]*namespace:[[:space:]]/d" "$K8S_DIR/job-migrate.yaml" \
             | sudo kubectl apply -n "$NS" -f -
           set +e
           sudo kubectl -n "$NS" wait --for=condition=complete --timeout=300s "job/$JOB_NAME"
@@ -297,7 +349,9 @@ jobs:
 
       - name: Set image tag in test overlay kustomization
         run: |
-          cd k8s/overlays/test
+          # TD-821: overlay path follows `appPath` via K8S_DIR — empty appPath
+          # yields the literal `k8s/overlays/test` used today.
+          cd "$K8S_DIR/overlays/test"
           sudo kubectl kustomize edit set image ghcr.io/tradefairs/${{ inputs.slug }}=ghcr.io/tradefairs/${{ inputs.slug }}:$IMAGE_TAG 2>/dev/null || \
             sed -i "s/newTag: .*/newTag: $IMAGE_TAG/" kustomization.yaml
           cat kustomization.yaml
@@ -312,7 +366,8 @@ jobs:
           # cluster access needed for `kubectl kustomize`), then `sudo kubectl apply`
           # the static rendered manifests.
           git config --global url."https://x-access-token:${{ secrets.NPM_TOKEN }}@github.com/".insteadOf "https://github.com/"
-          kubectl kustomize k8s/overlays/test/ > /tmp/${{ inputs.slug }}-manifests.yaml
+          # TD-821: overlay path follows `appPath` via K8S_DIR.
+          kubectl kustomize "$K8S_DIR/overlays/test/" > /tmp/${{ inputs.slug }}-manifests.yaml
           sudo kubectl apply -f /tmp/${{ inputs.slug }}-manifests.yaml
           # PoC (PLAN-107): NO `rollout restart`. `apply` with the new immutable image
           # tag already triggers a clean single-generation rollout. The extra restart
