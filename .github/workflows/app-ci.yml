@@ -73,6 +73,19 @@ on:
           (e.g. '["self-hosted","liv26"]').
         type: string
         default: '"ubuntu-latest"'
+      skipBuildImage:
+        description: >-
+          Skip the `build-image` job entirely (shown as a "skipped" check with
+          this reason, never silently absent) instead of running the Docker
+          build. For callers whose own Dockerfile requires a monorepo-root
+          build context (`bvv-platform`'s `apps/*/Dockerfile`, ADR-071 §11.1)
+          that a standalone checkout structurally cannot provide — no
+          `context:`/`file:` value fixes a `COPY packages/*` against a tree
+          with no `packages/` (k8s-workspace:TD-656, k8s-workspace:TD-831).
+          Default false = build (today's behavior, unaffected for every
+          caller that does not opt in).
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -275,7 +288,7 @@ jobs:
     # caller's own reliable top-level context) sidesteps that class of bug
     # entirely; the nested `github.event.pull_request.*` fields are not
     # otherwise used for this gate.
-    if: inputs.draft == false
+    if: inputs.draft == false && !inputs.skipBuildImage
     needs: ci
     runs-on: ${{ fromJSON(inputs.ciRunsOn) }}
     # 2026-07-26 incident (service-desk PR #245, run 30210209077): the
