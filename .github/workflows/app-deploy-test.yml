@@ -45,6 +45,20 @@ on:
           `bvv-platform` monorepo (ADR-071 step 4+, not in scope here).
         type: string
         default: ''
+      require_pr_image:
+        description: >-
+          Scoped opt-in (TD-684, operator decision 2026-08-17): when `true`,
+          the "Resolve PR image" step's three degrade-to-fallback cases (`gh
+          api` failure, no PR found for the merge SHA, `imagetools inspect`
+          not-found) become a hard job failure instead of falling through to
+          the "Build and push test image (fallback...)" rebuild step. Default
+          is a no-op `false`: every existing caller keeps today's exact
+          fail-open behavior until it opts in. Only `bvv-platform`'s 11
+          `deploy-<slug>` callers set this to `true`; the 9 external
+          standalone-repo callers and `bvv-platform`'s own direct-push
+          recovery path are unaffected.
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-${{ inputs.slug }}
@@ -126,17 +140,29 @@ jobs:
         id: pr_image
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUIRE_PR_IMAGE: ${{ inputs.require_pr_image }}
         run: |
           # Find the PR merged into this commit; its head SHA is the :pr-<sha> tag
           # ci.yml (app-ci.yml@v2) built. On merge we retag that image — no rebuild.
           # Resilient (ADR-034 "never fail closed"): if the API call fails (missing
           # pull-requests:read, transient 5xx), degrade to fallback rebuild, don't abort.
+          # TD-684: when require_pr_image=true (bvv-platform's own callers only, per
+          # the 2026-08-17 operator decision), all three degrade-to-fallback cases
+          # below become a hard failure instead — no fallback rebuild is reachable.
           if ! PR_SHA=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0].head.sha // ""' 2>/dev/null); then
+            if [ "$REQUIRE_PR_IMAGE" = "true" ]; then
+              echo "::error::require_pr_image=true: gh api commits/<sha>/pulls failed (permissions/transient) — refusing to fall back to rebuild"
+              exit 1
+            fi
             echo "::warning::gh api commits/<sha>/pulls failed (permissions/transient) — falling back to rebuild"
             echo "image_found=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ -z "$PR_SHA" ]; then
+            if [ "$REQUIRE_PR_IMAGE" = "true" ]; then
+              echo "::error::require_pr_image=true: no PR associated with merge ${{ github.sha }} (direct push?) — refusing to fall back to rebuild"
+              exit 1
+            fi
             echo "No PR associated with merge ${{ github.sha }} (direct push?). Falling back to rebuild."
             echo "image_found=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -146,6 +172,10 @@ jobs:
           if docker buildx imagetools inspect "ghcr.io/tradefairs/${{ inputs.slug }}:pr-$PR_SHA" >/dev/null 2>&1; then
             echo "image_found=true" >> "$GITHUB_OUTPUT"
           else
+            if [ "$REQUIRE_PR_IMAGE" = "true" ]; then
+              echo "::error::require_pr_image=true: ghcr.io/tradefairs/${{ inputs.slug }}:pr-$PR_SHA not found — refusing to fall back to rebuild"
+              exit 1
+            fi
             echo "::warning::ghcr.io/tradefairs/${{ inputs.slug }}:pr-$PR_SHA not found; will rebuild"
             echo "image_found=false" >> "$GITHUB_OUTPUT"
           fi
