@@ -1,0 +1,8 @@
+{
+  "name": "tradefairs-dot-github",
+  "private": true,
+  "description": "Reusable GitHub Actions workflows and CI/CD tooling for the TradeFairs org (TradeFairs/.github).",
+  "scripts": {
+    "test:promotion-contract": "node scripts/test-promotion-contract.mjs"
+  }
+}
