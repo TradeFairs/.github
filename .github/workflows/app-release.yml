@@ -286,8 +286,15 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ inputs.releaseVersion }}
             ${{ env.IMAGE }}:latest
-          cache-from: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache,mode=max
+          # k8s-workspace:TD-679: registry cache-from/cache-to conditioned off on
+          # self-hosted (liv26) — same `!contains(inputs.ciRunsOn, 'self-hosted')`
+          # formula as TD-294's already-fixed app-ci.yml. TD-282's classic-driver
+          # local BuildKit cache is already warm/shared on liv26, so the registry
+          # round-trip over liv26's 50/50 Mbit WAN link (ADR-047) is pure
+          # redundant cost. ubuntu-latest fallback (default `ciRunsOn`) is
+          # unchanged — genuinely needs registry cache, ephemeral VM per release.
+          cache-from: ${{ !contains(inputs.ciRunsOn, 'self-hosted') && format('type=registry,ref=ghcr.io/tradefairs/{0}:buildcache', inputs.slug) || '' }}
+          cache-to: ${{ !contains(inputs.ciRunsOn, 'self-hosted') && format('type=registry,ref=ghcr.io/tradefairs/{0}:buildcache,mode=max', inputs.slug) || '' }}
 
       - name: Bump to next SNAPSHOT
         run: |
