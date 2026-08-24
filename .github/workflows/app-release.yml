@@ -596,6 +596,15 @@ jobs:
           fi
           set -e
 
+      - name: Decrypt and apply SOPS secret (if migrated)
+        run: |
+          SECRET_FILE="$K8S_DIR/overlays/prod/secrets.enc.yaml"
+          if [ -f "$SECRET_FILE" ]; then
+            sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f -
+          else
+            echo "::notice::$SECRET_FILE not present — app not yet migrated to SOPS on prod, skipping (manual secret application unchanged)"
+          fi
+
       - name: Apply prod manifests
         run: |
           # render-then-apply (PLAN-104 X2): kubectl kustomize as runner user (with
