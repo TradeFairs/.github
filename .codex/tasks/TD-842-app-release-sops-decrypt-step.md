@@ -1,4 +1,4 @@
-Status: READY_FOR_REVIEW
+Status: APPROVED
 Blocked-By:
 Gate-Granted:
 Complexity: complex
@@ -466,3 +466,62 @@ negative-key criterion, each with the named blocker above. I am not claiming any
 | **High** | Ztráta produkčních dat, bezpečnostní zranitelnost nebo tichá degradace (silent failure bez viditelného erroru). |
 | **Medium** | Výrazně nefunkční část funkcionality viditelná uživateli nebo blocker pro navazující TDs. |
 | **Low** | Developer experience, kosmetická vada nebo technický dluh bez dopadu na produkční uživatele. |
+
+## Gate Notes — Architect review 2026-08-24 (APPROVED)
+
+Verdict: **APPROVED** for coder commit `2281de3`.
+
+Load-bearing claims re-verified by EXECUTION, not read from the retrospective. The step's
+`run:` was extracted from the PARSED YAML, `${{ inputs.slug }}` rendered (0 expressions left),
+and each case run under `bash -e` — GitHub's real default shell, *without* `pipefail` — with a
+fake `sops`/`sudo` where the fake `sudo` consumes stdin and exits 0, mimicking `kubectl apply`:
+
+| case | exit | observed |
+|---|---|---|
+| neither file | 0 | `::notice::` skip |
+| legacy only | 0 | applies + `::warning::` |
+| both present | 0 | infra-liv11 wins, no warning |
+| `sops -d` fails, pipefail present | **1** | fails loudly |
+| same, only `set -o pipefail` removed (1-line delta) | **0** | silent green, no Secret |
+
+Note: the coder reported exit **128** for case 4; I measure **1**. The discrepancy is an
+artifact of their fake `sops` stub, not of the workflow — the conclusion (pipefail is
+load-bearing) is unaffected, and the one-line delta between cases 4 and 5 proves it.
+
+Structural constraints confirmed on the committed content: `workflow_call` keys are `['inputs']`
+only (**no `secrets:` block**, so `secrets: inherit` remains the sole mechanism for all callers);
+`path: .infra-liv11` present on the infra checkout; step order in `deploy-prod` is
+migrations (6) -> decrypt (7) -> Apply prod manifests (8). `bash -n` OK, `shellcheck -s bash`
+clean.
+
+**The coder's flagged unknown is RESOLVED — by production evidence, not assumption.** They
+declared they could not prove `NPM_TOKEN` reads private `infra-liv11` (and mis-cited L613; the
+url-rewrite is at **L683**). It does: `infra-liv11` is confirmed private (`gh api ... .private`
+= true), and several apps' **prod** overlays already consume it as a REMOTE kustomize base —
+e.g. `bvv-portal/k8s/overlays/prod/kustomization.yaml` pulls
+`github.com/TradeFairs/infra-liv11/k8s-base?ref=k8s-base-v1.0.3` — resolved through the L683
+`insteadOf` rewrite in this same job, whose Release runs are green as recently as today. The
+token demonstrably reaches that repo from this job.
+
+**Four AC correctly left unchecked.** Each demands something outside a coder turn: two require a
+live prod dispatch ("proven live" is explicit in the AC text, so simulated execution does not
+satisfy it), and the negative-key test is impossible until the operator mints the second
+per-environment age key (`infra-liv11` has no `environments/` yet). Declared with named
+blockers rather than downgraded — the honest direction, and the opposite of the earlier
+CHANGES_REQUESTED round, whose defect was exactly that the coder downgraded a hard STOP.
+
+**Sequencing consequence discovered during this review — do not skip.** The prod path is
+genuinely unaffected today: `sops -d` count is 0 in every referenced tag (`v2.4.3` x12,
+`v2.2.3` x13, `v2` x7, `v2.1.4` x2); only `v2.4.4` carries the step and **no caller references
+it**. The TEST path is NOT: `bvv-platform/.github/workflows/deploy-affected.yml` pins
+`app-deploy-test.yml@main` **twelve times**, on every push to main, and `.github` main still
+carries the defective path. So TD-841's fix must land on `.github` **main**, and it takes effect
+immediately for all twelve apps — which makes live no-op verification a real merge gate, not a
+formality. Recorded in k8s-workspace `BACKLOG.md`.
+
+Known tooling defect, not a TD-842 defect: `td-transition.mjs` labels the emitted events
+`repo: k8s-workspace` / `subject: k8s-workspace:TD-842` although this TD lives in `.github` —
+`repoFromGitRemote()` infers the repo from the CWD, not from the TD file's owner. Per ADR-075 §5
+the log is append-only, so the rows stay; these Gate Notes are the correction of record. Tracked
+in `BACKLOG.md` (k8s-workspace:TD-1073, `Status: TODO` — the row's earlier `closed:fixed:`
+marking was premature and has been reopened).
