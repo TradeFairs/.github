@@ -105,7 +105,7 @@ existing manual-Secret-application deploy behavior for those apps is completely 
 ## Acceptance Criteria
 - [x] New "Decrypt and apply SOPS secret (if migrated)" step added to `app-deploy-test.yml`,
       positioned before "Apply manifests".
-- [ ] For an app with no `secrets.enc.yaml`, a live `test` deploy shows the `::notice::` skip
+- [x] For an app with no `secrets.enc.yaml`, a live `test` deploy shows the `::notice::` skip
       line and completes with identical behavior to before this TD (no regression for any of the
       13 not-yet-migrated callers).
 - [ ] For an app that has adopted SOPS (once one exists), a live `test` deploy decrypts and
@@ -321,7 +321,7 @@ R4. `set -o pipefail` is **not** to be added blindly to this step — but do ver
 - [x] The decrypt step resolves `infra-liv11/environments/test/<slug>/secrets.enc.yaml` first and
       the legacy `$K8S_DIR/overlays/test/secrets.enc.yaml` only as a fallback, emitting a
       `::warning::` when the fallback is used.
-- [ ] With neither file present the step is a pure no-op emitting `::notice::`, and the deploy
+- [x] With neither file present the step is a pure no-op emitting `::notice::`, and the deploy
       outcome is byte-for-byte the same shape as before this TD (proven live).
 - [x] The decrypted Secret is still applied BEFORE the manifests are applied.
 - [x] A failing `sops -d` fails the step (does not pass through to a green job) — stated with
@@ -524,3 +524,36 @@ exists and was not passed. This is a shared-tooling/caller-discipline defect aff
 cross-repo TD, already recorded in PLAN-250 Gate Notes (lines 179-190). Per ADR-075 §5 the log is
 append-only and must not be rewritten. Routed to BACKLOG as its own finding; it does not block
 this TD, whose implementation is unaffected.
+
+## Live verification 2026-08-24 (TD-841 AC L108 + L324 now MET)
+
+Run [32781926395](https://github.com/TradeFairs/bvv-platform/actions/runs/32781926395),
+`workflow_dispatch` of `deploy-affected.yml` with `slug=bvv-notification-hub`, executed AFTER
+PR #37 merged to `.github` main (`cdd44fc`). This is the first run of the reworked step.
+
+**Emitted output** (the real `##[notice]`, not the echoed script source):
+
+```
+##[notice]No secrets.enc.yaml at .infra-liv11/environments/test/bvv-notification-hub/secrets.enc.yaml
+or apps/bvv-notification-hub/k8s/overlays/test/secrets.enc.yaml — app not yet migrated to SOPS,
+skipping (manual secret application unchanged)
+```
+
+Both candidate paths resolved correctly, `${{ inputs.slug }}` rendered to the real slug, no
+`::warning::` fired (the legacy branch was not taken), and the job continued to
+`deployment "bvv-notification-hub" successfully rolled out` with the version smoke passing.
+Conclusion: **success**.
+
+**The last unproven assumption is now proven live.** The reviewer and coder could only argue
+from existing usage that `secrets.NPM_TOKEN` reads private `infra-liv11`. The log shows the
+checkout itself succeeding in this job:
+
+```
+Syncing repository: TradeFairs/infra-liv11
+Working directory is '/data/runner/_work/bvv-platform/bvv-platform/.infra-liv11'
+```
+
+Still genuinely UNMET (unchanged, named blockers): the live DECRYPT path (no app has a
+`secrets.enc.yaml` yet — `infra-liv11` has no `environments/`), and negative per-environment key
+verification (operator has not minted the second age key). Both are PLAN-250 wave-1 gates, not
+properties of this step.

@@ -525,3 +525,23 @@ Known tooling defect, not a TD-842 defect: `td-transition.mjs` labels the emitte
 the log is append-only, so the rows stay; these Gate Notes are the correction of record. Tracked
 in `BACKLOG.md` (k8s-workspace:TD-1073, `Status: TODO` — the row's earlier `closed:fixed:`
 marking was premature and has been reopened).
+
+## Note 2026-08-24 — TD-841's live gate is met; TD-842's is NOT
+
+The test-side twin was verified live in run
+[32781926395](https://github.com/TradeFairs/bvv-platform/actions/runs/32781926395)
+(`deploy-affected.yml`, `slug=bvv-notification-hub`), after PR #37 merged to `.github` main:
+the reworked step emitted its `::notice::` no-op with both candidate paths correctly resolved,
+and the `.infra-liv11` checkout succeeded — proving `secrets.NPM_TOKEN` reads the private repo
+from a real job rather than by argument from existing usage.
+
+**That evidence does NOT transfer to this TD.** `app-release.yml`'s `deploy-prod` is a separate
+job with its own checkout, and the run above exercised only `app-deploy-test.yml`. The two
+prod-side AC (L105, L319) therefore stay unchecked: they require an actual prod release, which
+is a deliberate operator decision, not something to trigger for verification alone.
+
+The prod blast radius is unchanged and nil in the meantime — `sops -d` count is 0 in every
+referenced tag (`v2.4.3` x12, `v2.2.3` x13, `v2` x7, `v2.1.4` x2); only `v2.4.4` carries the
+step and no caller points at it. The step will first execute for real when the fleet-wide
+`uses:`-bump happens, which is the natural gate for verifying it.
+
