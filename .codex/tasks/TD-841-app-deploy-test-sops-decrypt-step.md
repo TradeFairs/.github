@@ -1,4 +1,4 @@
-Status: CHANGES_REQUESTED
+Status: READY_FOR_REVIEW
 Blocked-By:
 Gate-Granted:
 Complexity: complex
@@ -340,59 +340,116 @@ R4. `set -o pipefail` is **not** to be added blindly to this step — but do ver
   all existing callers that rely on `secrets: inherit`).
 
 ## Retrospective
-Added the "Decrypt and apply SOPS secret (if migrated)" step to
-`.github/workflows/app-deploy-test.yml`'s `deploy` job, inserted immediately before "Apply
-manifests" (after "Set image tag in test overlay kustomization", which is itself after "Resolve
-test namespace from overlay" so `$NS`/`$K8S_DIR` are already set). The step is a pure
-file-existence gate on `$K8S_DIR/overlays/test/secrets.enc.yaml`: when absent it emits the
-`::notice::` skip line and does nothing else; when present it pipes `sops -d` into
-`sudo kubectl apply -n "$NS" -f -`, exactly as specified in Steps §1.
 
-`actionlint` (run via `docker run rhysd/actionlint:latest` — no local binary and no in-repo CI
-config runs actionlint against this repo's own workflow files, since `.github` is the reusable-
-workflow source repo, not a consumer) reported two findings, both pre-existing and unrelated to
-this change: (1) `runs-on: [self-hosted, liv11]` — an unknown custom label to actionlint's
-built-in label list (line 273, pre-existing, not part of this TD's scope), and (2) SC2086 at line
-426 in the pre-existing "Set image tag in test overlay kustomization" step (this is sibling
-TD-840's exact subject, tracked separately). My inserted step (lines 434-448) produced zero new
-findings.
+### Rework 2026-08-24 (this commit) — secret source moved to `infra-liv11`
+Implemented the reworked Steps R1-R4. Two edits to `.github/workflows/app-deploy-test.yml`,
+both inside the `deploy` job:
 
-Runner-side prerequisite verification (Steps §2) was partial: `sops 3.13.3` is confirmed present
-system-wide at `/usr/local/bin/sops` on liv11 (in PATH for any user, including the `runner`
-GHA-runner account). I could NOT directly inspect `/home/runner/.config/sops/age/keys.txt` from my
-own SSH session — `/home/runner` is `700`-permission-isolated from my own user, which is the
-*correct* posture (not evidence of absence). I have no passwordless-sudo path to the `runner`
-account from this session to confirm the age key file itself. Per the TD's own guidance
-("verify it survived, do not re-provision... if missing, that is a live blocker to record, not
-something this TD provisions"), I'm recording this as a partial verification rather than treating
-it as a STOP: the binary is confirmed, the key file is unconfirmed-but-plausible (PLAN-249 is
-recorded as having provisioned and proven this exact mechanism end-to-end on this same runner for
-its own pilot). This should be closed out by whoever runs the live-dispatch verification below.
+1. **New step "Checkout infra-liv11 (cluster-specific SOPS material, ADR-082)"** (R1), positioned
+   immediately after the existing `actions/checkout@v5` and before every step that consumes the
+   workspace. Uses `repository: TradeFairs/infra-liv11`, `path: .infra-liv11`, `ref: main`,
+   `token: ${{ secrets.NPM_TOKEN }}` verbatim as the TD specifies. `path:` is present (the
+   mandatory bit — a default-path checkout would have clobbered the caller's own checkout). I did
+   **not** add a `secrets:` block to `workflow_call`; the parsed `workflow_call` keys are
+   `['inputs']` only, so every caller's `secrets: inherit` remains the sole mechanism.
+2. **Replaced the decrypt step's body** (R2) with the infra-first / legacy-fallback resolution,
+   keeping the step's name and its position immediately before "Apply manifests" (R3 — verified by
+   parsing the YAML: infra checkout idx=1, decrypt idx=8, "Apply manifests" idx=9). Added
+   `set -o pipefail` (R4, see evidence below). No `SOPS_AGE_KEY_FILE` pinning and no
+   `--age`/recipient flag was added, per "Per-environment keys".
 
-The TD's Execution & Verification also calls for two *live* dispatches (no-op path on an
-unmigrated app; real decrypt path once a per-app TD lands a `secrets.enc.yaml`). Neither was
-performed in this coding turn: `app-deploy-test.yml` is only reachable via `workflow_call` from a
-caller's `uses:` reference — there is no standalone `workflow_dispatch` trigger on this file to
-invoke it directly, and a real caller-side dispatch only exercises the branch once merged (or a
-caller temporarily points its `uses:` ref at this branch, which is a cross-repo coordination step
-outside a single-TD Coder turn). Both live-verification lines are left as explicit follow-ups
-below for the review/merge stage, per this workspace's Coder-does-not-merge-own-work convention —
-they are exactly the kind of check that belongs after a PR exists, not before.
+Note on starting state: the dispatch briefing said `app-deploy-test.yml` was still untouched on
+this branch and that implementation started from zero. That was inaccurate — the `v2.4.4` step
+from coder commit `ee09935` / `83b589e` was present at lines 433-448, reading the wrong
+`$K8S_DIR/overlays/test/secrets.enc.yaml` path exactly as the Rework Context describes. I
+therefore *replaced* that body rather than adding a step from scratch. Net result is what the TD
+specifies either way; recording it because the two accounts differ.
+
+### Verification actually performed
+- **`actionlint`** (via `docker run rhysd/actionlint:latest`, v1.7.12 — still no local binary and
+  no in-repo CI gate running actionlint against this repo's own workflows): exit 0 with exactly
+  the two findings the TD pre-declares as out of scope — `label "liv11" is unknown` at
+  `:273:28`, and `SC2086:info` at `:450:9`, which is the pre-existing "Set image tag in test
+  overlay kustomization" step's unquoted `$IMAGE_TAG` (sibling `.github:TD-840`'s subject, line
+  number shifted only because my step grew above it). **My added lines produced zero new
+  findings.**
+- **YAML parse + structural assertions** (`python3 -c` over the parsed document, not a grep):
+  `workflow_call` keys == `['inputs']` (no `secrets:` block added); the infra checkout carries
+  `with: [repository, path, ref, token]`; step ordering is checkout(0) → infra-liv11(1) →
+  resolve-NS(2) → … → decrypt(8) → Apply manifests(9).
+- **Shell correctness of the `run:` block, checked separately from the YAML parse** (the TD
+  briefing's point 4). I extracted the step's `run:` string from the parsed YAML, rendered
+  `${{ inputs.slug }}` → `demo-app` (asserting no `${{` survived), and ran `shellcheck -s bash`
+  on the result: **clean, zero findings**.
+- **Behavioral test of every branch**, same rendered script, with fake `sops`/`sudo` on `PATH`
+  and `NS`/`K8S_DIR` set:
+  - Neither file present (the 13 un-migrated callers): emits the `::notice::` line, `exit 0`,
+    nothing else — a pure no-op.
+  - Legacy file only: emits the `::warning::` naming the legacy path, then applies.
+  - Both files present: infra-liv11 wins, **no** `::warning::` — the "stale app-repo copy must
+    not win" ordering holds.
+  - `sops -d` fails while a file is present: **step exits 1**.
+- **R4 evidence (the `pipefail` question, answered with a perturbation, not an assertion).** In
+  the failing-`sops` case the fake `kubectl apply` still exits 0 on empty stdin — so the exit
+  status genuinely hinges on `pipefail`. Negative control: I stripped only the `set -o pipefail`
+  line from the same script and re-ran the identical case; it exited **0**, silently green with
+  no Secret applied. With the line present it exits **1**. So the existing shape did NOT already
+  fail loudly, `set -o pipefail` was required, and it is doing the work. This is exactly the
+  silent-green failure mode R4 names.
+- **Static read-proof of the path** (partial, see follow-up): `git ls-remote` against
+  `https://github.com/TradeFairs/infra-liv11 main` resolved to `01e9596a77ef1703eec1b94eeae7df593e3e2630`,
+  proving the private repo is readable and `ref: main` exists. **Caveat, stated plainly:** this
+  used my own session's `gh auth token`, not `secrets.NPM_TOKEN` — I have no way to exercise the
+  actual Actions secret outside a run. It proves the repo/ref resolve; it does not by itself
+  prove `NPM_TOKEN`'s scope. The operator's dispatch note states `NPM_TOKEN` already reads
+  `infra-liv11` (evidenced by `app-deploy-test.yml`'s existing url-rewrite at the "Apply
+  manifests" step for that same private remote base), which I took as given per instruction.
+- I did **not** create `environments/` in `infra-liv11`, did not touch ADR-013/ADR-082, did not
+  bump any caller's `uses:` ref, and did not touch `deploy-qa.yml`, `deploy-affected.yml`,
+  `monorepo-deploy-affected.yml` or any prod-side path. `git diff --stat` is a single file.
+
+### Verification NOT performed (explicitly unmet, not deferred silently)
+- **Live no-op dispatch** and **live decrypt dispatch** were not run. Per the dispatch
+  instruction I must not trigger a live `test` deploy: the branch is unmerged and I am not the
+  owner of that gate. Mechanically it is also not reachable — this file has no
+  `workflow_dispatch` trigger and is only invoked via a caller's `uses:`, so exercising it
+  requires either a merge or a temporary cross-repo `uses:`-ref override. **These two Acceptance
+  Criteria are therefore UNMET, not met** — the AC boxes stay unchecked and the corresponding
+  STOP condition ("STOP if the no-op path cannot be verified live before merging") is a live gate
+  for the merge stage, which I am flagging rather than clearing.
+- **Negative per-environment key verification** could not be run and is **deferred with a named
+  blocker**: `environments/{prod,test}/.sops.yaml` and the per-environment encrypted files do not
+  exist yet (they come from the `bvv-platform:TD-1090`..`TD-1095` batch), and, more fundamentally,
+  the second age key **does not exist yet** — liv11 has a single cluster-wide key and minting the
+  separate one is the operator's act, explicitly excluded from this TD. No exit code or stderr can
+  be recorded because the command has no inputs to run against. Blocker: *operator must mint the
+  per-environment key*.
+- **Runner-side age key** (`~/.config/sops/age/keys.txt` for the `runner` user) remains
+  unconfirmed for the same reason as the original turn — `/home/runner` is `700`-isolated from my
+  session and I have no passwordless-sudo path to that account. `sops` the binary was confirmed
+  present in the earlier turn; nothing in this rework changes that gap.
 
 ### Follow-ups
-- Medium: Live-dispatch verification of the no-op path (deploy for an app with no
-  `secrets.enc.yaml`, confirm `::notice::` skip line and unchanged deploy outcome) has not yet
-  been performed — required before merge per this TD's own STOP condition. Needs a PR/branch ref
-  a caller can exercise, or a temporary `uses:`-ref override in one of the 13 caller repos.
-- Low: Live-dispatch verification of the decrypt path (once a per-app TD from
-  `bvv-platform:TD-1084`..`TD-1089` lands a real `secrets.enc.yaml`) is naturally blocked until
-  one of those per-app TDs lands; tracked here as a pointer back to this TD for whoever performs
-  that first real-secret test deploy.
-- Low: Could not directly confirm the `runner` user's age private key file
-  (`~/.config/sops/age/keys.txt` under `/home/runner`, `700`-permission-isolated from this
-  session) survived from PLAN-249's provisioning — only the system-wide `sops` binary was
-  directly confirmed. Worth a quick `sudo -u runner sops -d <known-test-file>` smoke check by
-  whoever has runner-level access, before the first real decrypt dispatch.
+- **High**: Live no-op verification is still outstanding and is now *strictly more load-bearing*
+  than before this rework: the new `infra-liv11` checkout step runs on **every** deploy of **all
+  13 callers**, migrated or not, so a token/permission problem there fails deploys that have
+  nothing to do with SOPS. Must be exercised before the fleet-wide `uses:`-ref bump. Needs a
+  branch/PR ref a caller can point at temporarily, or a post-merge canary on one app.
+- **High**: Negative key verification (a `prod` file must NOT decrypt with the `test` key)
+  deferred on a named blocker — the operator has not yet minted the second, per-environment age
+  key; today liv11 has one cluster-wide key. Until then ADR-082's per-environment separation is
+  asserted but unproven. Both directions must be tested (each environment's own key decrypts its
+  own file, and cross-environment decrypt fails), since a negative test that passes because
+  nothing decrypts anything proves nothing.
+- **Medium**: Live decrypt verification — after a per-app TD lands a real
+  `infra-liv11/environments/test/<app>/secrets.enc.yaml`, confirm the run log shows
+  `Applying SOPS secret from .infra-liv11/environments/test/<app>/secrets.enc.yaml` and the pod
+  reads the decrypted value.
+- **Low**: Confirm the `runner` user's age private key file survived PLAN-249's provisioning
+  (`sudo -u runner sops -d <known-test-file>`), by whoever has runner-level access, before the
+  first real decrypt dispatch.
+- **Low**: The legacy app-repo fallback path plus its `::warning::` is transitional by design and
+  should be removed once PLAN-250 wave 1 completes; nothing currently tracks that deletion.
 
 ### Severity (povinné pro každý nález)
 | Úroveň | Definice |
