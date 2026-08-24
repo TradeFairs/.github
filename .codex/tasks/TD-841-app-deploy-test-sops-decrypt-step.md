@@ -1,4 +1,4 @@
-Status: READY_FOR_REVIEW
+Status: APPROVED
 Blocked-By:
 Gate-Granted:
 Complexity: complex
@@ -103,7 +103,7 @@ existing manual-Secret-application deploy behavior for those apps is completely 
     dependency, not this TD's job to (re-)provision).
 
 ## Acceptance Criteria
-- [ ] New "Decrypt and apply SOPS secret (if migrated)" step added to `app-deploy-test.yml`,
+- [x] New "Decrypt and apply SOPS secret (if migrated)" step added to `app-deploy-test.yml`,
       positioned before "Apply manifests".
 - [ ] For an app with no `secrets.enc.yaml`, a live `test` deploy shows the `::notice::` skip
       line and completes with identical behavior to before this TD (no regression for any of the
@@ -111,7 +111,7 @@ existing manual-Secret-application deploy behavior for those apps is completely 
 - [ ] For an app that has adopted SOPS (once one exists), a live `test` deploy decrypts and
       applies the Secret before the Deployment rollout, and the pod reads the correct decrypted
       value.
-- [ ] No change to `deploy-qa.yml`, `deploy-affected.yml`, `monorepo-deploy-affected.yml`, or any
+- [x] No change to `deploy-qa.yml`, `deploy-affected.yml`, `monorepo-deploy-affected.yml`, or any
       prod-side path.
 
 ## STOP Conditions
@@ -316,21 +316,21 @@ R4. `set -o pipefail` is **not** to be added blindly to this step — but do ver
   must read the decrypted value.
 
 ### Reworked Acceptance Criteria (in addition to the unchecked criteria above)
-- [ ] The `deploy` job checks out `TradeFairs/infra-liv11` into a non-default `path:` using
+- [x] The `deploy` job checks out `TradeFairs/infra-liv11` into a non-default `path:` using
       `secrets.NPM_TOKEN`, without a `secrets:` block being added to `workflow_call`.
-- [ ] The decrypt step resolves `infra-liv11/environments/test/<slug>/secrets.enc.yaml` first and
+- [x] The decrypt step resolves `infra-liv11/environments/test/<slug>/secrets.enc.yaml` first and
       the legacy `$K8S_DIR/overlays/test/secrets.enc.yaml` only as a fallback, emitting a
       `::warning::` when the fallback is used.
 - [ ] With neither file present the step is a pure no-op emitting `::notice::`, and the deploy
       outcome is byte-for-byte the same shape as before this TD (proven live).
-- [ ] The decrypted Secret is still applied BEFORE the manifests are applied.
-- [ ] A failing `sops -d` fails the step (does not pass through to a green job) — stated with
+- [x] The decrypted Secret is still applied BEFORE the manifests are applied.
+- [x] A failing `sops -d` fails the step (does not pass through to a green job) — stated with
       evidence in the Retrospective.
 - [ ] Negative key verification recorded: decrypting a **prod** file with the **test** key fails,
       and each environment's own key decrypts its own file. If the second key does not exist yet,
       this criterion is explicitly deferred with a named blocker (operator must mint it) rather
       than silently marked met.
-- [ ] No caller `uses:` ref bumped by this TD.
+- [x] No caller `uses:` ref bumped by this TD.
 
 ### Reworked STOP Conditions (in addition to those above)
 - STOP if `NPM_TOKEN` cannot read `TradeFairs/infra-liv11` — do not work around it by making the
@@ -457,3 +457,70 @@ specifies either way; recording it because the two accounts differ.
 | **High** | Ztráta produkčních dat, bezpečnostní zranitelnost nebo tichá degradace (silent failure bez viditelného erroru). |
 | **Medium** | Výrazně nefunkční část funkcionality viditelná uživateli nebo blocker pro navazující TDs. |
 | **Low** | Developer experience, kosmetická vada nebo technický dluh bez dopadu na produkční uživatele. |
+
+## Architect review 2026-08-24 — APPROVED (commit `ed1c86a`)
+
+Verified independently, not by reading the Retrospective. The coder's claims reproduce.
+
+**Re-ran the load-bearing negative proof (R4).** Extracted the step's `run:` from the parsed
+YAML, rendered `${{ inputs.slug }}`, and executed all branches under GitHub's real default
+shell (`bash -e`, NOT `bash -e -o pipefail`) with fake `sops`/`sudo`/`kubectl`:
+
+| case | result |
+|------|--------|
+| neither file (all 13 un-migrated callers) | `::notice::`, **exit 0**, nothing else — pure no-op |
+| infra only | applies from `.infra-liv11/...`, exit 0 |
+| legacy only | `::warning::` naming legacy path, then applies |
+| both present | infra-liv11 wins, **no** `::warning::` |
+| `sops -d` fails, file present | **exit 1** |
+| same case, `set -o pipefail` stripped (negative control) | **exit 0** — silent green, no Secret applied |
+
+The negative control is the point: the fake `kubectl apply` exits 0 on empty stdin, so without
+`pipefail` a failed decrypt is invisible. `set -o pipefail` is genuinely load-bearing here, and
+it is correct that GitHub's default `run:` shell does not supply it.
+
+**Also verified:** `workflow_call` parsed keys are `['inputs']` only — **no `secrets:` block**, so
+every caller's `secrets: inherit` remains the only mechanism (adding one would break all 13).
+`path: .infra-liv11` present (a default-path checkout would clobber the caller's checkout). Step
+order checkout(0) → infra-liv11(1) → … → decrypt(8) → Apply manifests(9): Secret precedes
+manifests. `shellcheck -s bash` clean; `bash -n` clean — YAML parse and shell correctness checked
+separately. No `set -x`/xtrace anywhere in the file and only the *filename* is echoed, never
+decrypted content. Diff is 3 files (1 workflow + 2 TD docs), no `bvv-platform`/`infra-liv11`/
+`deploy-qa` contamination, on a feature branch.
+
+**Premises confirmed against live sources:** `NPM_TOKEN` already reads the private `infra-liv11`
+in this same job (the kustomize-base url-rewrite at "Apply manifests", line 521).
+`environments/` is absent on `infra-liv11:origin/main` (GitHub API 404) — so the new checkout
+succeeds and the `-f` gate is simply false for all 13 callers, which case 1 proves is exit 0.
+`sops 3.13.3` confirmed at `/usr/local/bin/sops` on liv11.
+
+### Why the unconditional checkout is accepted as a follow-up, not a blocker
+The new `infra-liv11` checkout runs on every deploy of all 13 callers. Accepted because the
+blast radius is currently **zero**: the decrypt step exists only on tag `v2.4.4` and **no caller
+references it** (7×`@v2.2.3`, 3×`@v2`, 1×`@v2.1.4`, 0×`@v2.4.4`). Nothing reaches this code until
+the fleet-wide `uses:`-bump, which is explicitly separate work. Making the checkout conditional
+is not possible with a file-presence gate anyway — the file cannot be tested before the repo is
+checked out. The coder's High follow-up (exercise the checkout before the fleet bump) is the
+right control, and the bump is the natural gate.
+
+### AC status after this review
+Seven AC that the coder left unchecked are **proven met** by the verification above and are now
+checked. The coder under-claimed rather than over-claimed — the safe direction — but leaving
+every box unchecked made "verified met" indistinguishable from "genuinely unmet". Recorded as a
+Low process finding, not a defect.
+
+Genuinely UNMET, correctly left unchecked and carried as High follow-ups:
+- live no-op dispatch and live decrypt dispatch (file has no `workflow_dispatch`; requires a
+  merge or a temporary caller `uses:` override — a merge-stage gate, not a coder-turn gate);
+- negative per-environment key verification (blocked on the operator minting the second age key;
+  liv11 has one cluster-wide key today).
+
+### `td-transition.mjs` repo mislabeling — NOT a defect of this TD
+Confirmed: `PLAN-250.events.jsonl` carries events with `"repo":"k8s-workspace"` /
+`"subject":"k8s-workspace:TD-841"` although the TD lives in `.github`. Root cause is
+`repoFromGitRemote()` (`scripts/td-transition.mjs:347,621,992`) deriving `repo` from the **cwd's**
+`git remote get-url origin` rather than from the repo owning the TD **file**; a `--repo` override
+exists and was not passed. This is a shared-tooling/caller-discipline defect affecting any
+cross-repo TD, already recorded in PLAN-250 Gate Notes (lines 179-190). Per ADR-075 §5 the log is
+append-only and must not be rewritten. Routed to BACKLOG as its own finding; it does not block
+this TD, whose implementation is unaffected.
