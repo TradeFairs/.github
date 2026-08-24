@@ -431,6 +431,22 @@ jobs:
             sed -i "s/newTag: .*/newTag: $IMAGE_TAG/" kustomization.yaml
           cat kustomization.yaml
 
+      - name: Decrypt and apply SOPS secret (if migrated)
+        # ADR-013 (SOPS+age secrets management) / TD-841: decrypt-and-apply, gated
+        # purely on file presence. Placed BEFORE "Apply manifests" — the Secret
+        # must exist before the Deployment referencing it is applied, otherwise a
+        # fresh-migration app's first rollout would fail on a missing Secret. For
+        # the 13 apps that haven't migrated yet this file simply doesn't exist in
+        # their checked-out repo, so this step is a clean no-op: today's manual
+        # Secret-application deploy behavior is completely unchanged for them.
+        run: |
+          SECRET_FILE="$K8S_DIR/overlays/test/secrets.enc.yaml"
+          if [ -f "$SECRET_FILE" ]; then
+            sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f -
+          else
+            echo "::notice::$SECRET_FILE not present — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
+          fi
+
       - name: Apply manifests
         run: |
           # The overlay pulls a remote kustomize base from the PRIVATE
