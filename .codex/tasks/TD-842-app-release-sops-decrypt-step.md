@@ -159,12 +159,17 @@ values coincide; the future prod cluster (~09/2026) gets its own `infra-xxx` by 
 `bvv-platform:TD-1090`..`TD-1095` were rewritten accordingly on branch
 `sess/20260824-plan250-td-rewrite` (commit `1d36e922`, not yet merged) and now target
 `infra-liv11/environments/{prod,test}/<app>/secrets.enc.yaml`. Those TDs are `Blocked-By` this
-one. **Note that `ADR-013` §Mechanismus still documents the OLD app-repo path**
-(`<app>/k8s/overlays/<env>/secrets.enc.yaml`) and its `.sops.yaml` example still uses
-`path_regex: k8s/overlays/...` — the ADR has not yet been revised to the operator's 2026-08-24
-decision. That ADR revision is a separate Architect task in `k8s-workspace` and is **not** in this
-TD's scope; this TD implements the operator decision, and the divergence is recorded here so the
-Coder does not "correct" the implementation back to the stale ADR text.
+one. **The normative ADR for this path is now
+[ADR-082](https://github.com/TradeFairs/k8s-workspace/blob/main/docs/adrs/ADR-082-adr-013-amendment-sops-material-belongs-to-infra-repo.md)**
+(`ACCEPTED`, merged 2026-08-24), which amends ADR-013 and makes
+`infra-<cluster>/environments/{prod,test}/<app>/secrets.enc.yaml` the target, with `.sops.yaml`
+**per environment** (`environments/{prod,test}/.sops.yaml`), not per repo. ADR-082 names this TD's
+rework commit `d5d0a051` in its own `**Related**` header, so the two are deliberately aligned.
+`ADR-013` §Mechanismus still shows the OLD app-repo path
+(`<app>/k8s/overlays/<env>/secrets.enc.yaml`) — that path is **deprecated with a legacy fallback**
+until PLAN-250 wave 1 completes, which is exactly the fallback this TD implements. Cite ADR-082,
+not ADR-013, as the justification for the target path; do not "correct" the implementation back to
+the app-repo path on the strength of ADR-013's stale §Mechanismus.
 
 ### Blast radius today (measured, not assumed)
 No app is affected right now: the decrypt step exists **only** on tag `v2.4.4`, and **zero**
@@ -210,7 +215,8 @@ committed `secrets.enc.yaml` under its own `k8s/overlays/prod/` keeps working.
   `k8s-base`, `k8s-base-fixture`, `manifests`, `platform`, `scripts`). It is created by the
   `bvv-platform:TD-1090`..`TD-1095` batch. This TD must therefore be correct against a repo where
   the directory is still absent — which the file-presence gate already guarantees.
-- **Do not revise ADR-013.** See Rework Context.
+- **Do not revise ADR-013 or ADR-082.** ADR-082 (merged 2026-08-24) already carries the
+  operator decision; see Rework Context. Doc changes in `k8s-workspace` are out of scope here.
 
 ### Per-environment keys — how this TD handles them
 `sops -d` selects the private key by matching the file's own encryption recipients against the
