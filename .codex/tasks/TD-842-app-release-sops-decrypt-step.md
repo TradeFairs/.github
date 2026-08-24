@@ -1,4 +1,4 @@
-Status: CHANGES_REQUESTED
+Status: READY_FOR_REVIEW
 Blocked-By:
 Gate-Granted:
 Complexity: complex
@@ -100,7 +100,7 @@ manual Secret application for those apps is completely unchanged.
     TD-841's dependency, verified independently for the `deploy-prod` job context).
 
 ## Acceptance Criteria
-- [ ] New "Decrypt and apply SOPS secret (if migrated)" step added to `app-release.yml`'s
+- [x] New "Decrypt and apply SOPS secret (if migrated)" step added to `app-release.yml`'s
       `deploy-prod` job, positioned after "Run DB migrations" and before "Apply prod manifests".
 - [ ] For an app with no prod `secrets.enc.yaml`, a live prod release shows the `::notice::` skip
       line and completes with identical behavior to before this TD (no regression for any
@@ -108,7 +108,7 @@ manual Secret application for those apps is completely unchanged.
 - [ ] For an app that has adopted SOPS on prod, a live release decrypts and applies
       `overlays/prod/secrets.enc.yaml` before the Deployment rollout, and the pod reads the
       correct decrypted value.
-- [ ] No change to `app-deploy-test.yml`, `release.yml` (thin callers), or any other workflow.
+- [x] No change to `app-deploy-test.yml`, `release.yml` (thin callers), or any other workflow.
 
 ## STOP Conditions
 - STOP if a task instruction conflicts with a Design Decision, skill, or architecture intent;
@@ -311,21 +311,21 @@ R4. `set -o pipefail` is **not** to be added blindly to this step — but do ver
   must read the decrypted value.
 
 ### Reworked Acceptance Criteria (in addition to the unchecked criteria above)
-- [ ] The `deploy-prod` job checks out `TradeFairs/infra-liv11` into a non-default `path:` using
+- [x] The `deploy-prod` job checks out `TradeFairs/infra-liv11` into a non-default `path:` using
       `secrets.NPM_TOKEN`, without a `secrets:` block being added to `workflow_call`.
-- [ ] The decrypt step resolves `infra-liv11/environments/prod/<slug>/secrets.enc.yaml` first and
+- [x] The decrypt step resolves `infra-liv11/environments/prod/<slug>/secrets.enc.yaml` first and
       the legacy `$K8S_DIR/overlays/prod/secrets.enc.yaml` only as a fallback, emitting a
       `::warning::` when the fallback is used.
 - [ ] With neither file present the step is a pure no-op emitting `::notice::`, and the deploy
       outcome is byte-for-byte the same shape as before this TD (proven live).
-- [ ] The decrypted Secret is still applied BEFORE the manifests are applied.
-- [ ] A failing `sops -d` fails the step (does not pass through to a green job) — stated with
+- [x] The decrypted Secret is still applied BEFORE the manifests are applied.
+- [x] A failing `sops -d` fails the step (does not pass through to a green job) — stated with
       evidence in the Retrospective.
 - [ ] Negative key verification recorded: decrypting a **prod** file with the **test** key fails,
       and each environment's own key decrypts its own file. If the second key does not exist yet,
       this criterion is explicitly deferred with a named blocker (operator must mint it) rather
       than silently marked met.
-- [ ] No caller `uses:` ref bumped by this TD.
+- [x] No caller `uses:` ref bumped by this TD.
 
 ### Reworked STOP Conditions (in addition to those above)
 - STOP if `NPM_TOKEN` cannot read `TradeFairs/infra-liv11` — do not work around it by making the
@@ -335,32 +335,130 @@ R4. `set -o pipefail` is **not** to be added blindly to this step — but do ver
   all existing callers that rely on `secrets: inherit`).
 
 ## Retrospective
-Added the "Decrypt and apply SOPS secret (if migrated)" step to `app-release.yml`'s
-`deploy-prod` job, positioned exactly as specified: after "Run DB migrations (pre-deploy
-Job)" and before "Apply prod manifests". The step reuses the already-resolved `$NS`/`$K8S_DIR`
-env vars from earlier in the same job and is a clean no-op (`::notice::` skip) when
-`overlays/prod/secrets.enc.yaml` does not exist, matching TD-841's shape in
-`app-deploy-test.yml`.
 
-`actionlint` (via the `rhysd/actionlint` Docker image, since no local binary or repo-native
-lint gate for this file was found) reports zero new findings on the added lines; the two
-pre-existing findings (`self-hosted`/`liv11` custom runner label at line 458, and a
-pre-existing SC2086 in "Apply prod manifests" at line ~609) are both outside this TD's
-`Included` scope and unrelated to this change (the SC2086 one is explicitly TD-840's territory
-per this repo's TD history).
+### Premise correction (important)
+The TD's original `## Goal`/`## Steps` say "add a new step". **That is false as of this
+session** — the step already existed. Verified before editing:
+`grep -n "Decrypt and apply SOPS" .github/workflows/app-release.yml` → `599:      - name:
+Decrypt and apply SOPS secret (if migrated)`. So this session **reworked an existing step**;
+the `## Rework 2026-08-24` section is the governing scope, and the two defects it names were
+both confirmed present in the shipped code before the edit.
 
-Live verification (AC items 2-3: no-op path and live-decrypt path via a real prod dispatch)
-was not performed in this session — no in-scope app currently ships a prod `secrets.enc.yaml`
-that would exercise the live path (`bvv-platform:TD-1081` had not yet landed one at
-implementation time), and dispatching a live prod release is outside a Coder's mechanical-edit
-scope without an explicit trigger. This mirrors TD-841's same constraint. Flagging for the
-Architect/Tester to confirm via a natural or dispatched prod release once available, per the
-TD's own STOP condition on the no-op path needing live verification before merge.
+### What was changed
+Two edits, both in `.github/workflows/app-release.yml`, `deploy-prod` job only:
+1. **New step "Checkout infra-liv11 (cluster-specific SOPS material, ADR-082)"** inserted
+   directly after the job's existing `actions/checkout@v5` (step index 0) at index 1, with
+   `repository: TradeFairs/infra-liv11`, `path: .infra-liv11` (mandatory — a default-path
+   checkout would clobber the caller's own checkout), `ref: main`,
+   `token: ${{ secrets.NPM_TOKEN }}`.
+2. **Reworked the existing decrypt step's body** to infra-first / legacy-fallback resolution,
+   mirroring TD-841's `app-deploy-test.yml` step (commit `ed1c86a`) with `test`→`prod`
+   substituted, plus `set -o pipefail`.
+
+`${{ inputs.slug }}` confirmed to exist in THIS workflow (`app-release.yml:16`, under
+`workflow_call.inputs`), so the app name is identified the same way as in `app-deploy-test.yml`
+— no alternative identifier was needed.
+
+### Defect 1 — wrong source path (confirmed, then fixed)
+Pre-edit the step read `SECRET_FILE="$K8S_DIR/overlays/prod/secrets.enc.yaml"`. `K8S_DIR` is
+defined at `app-release.yml:471` as a path relative to the CALLING app repo's checkout;
+`infra-liv11` never enters that checkout (this job consumes it only as a remote kustomize base,
+via the `url.insteadOf` rewrite in "Apply prod manifests"). With the secret in `infra-liv11`
+the `-f` test is false → the skip branch → **prod deploy green with no Secret applied**. Now
+resolved infra-first from `.infra-liv11/environments/prod/${{ inputs.slug }}/secrets.enc.yaml`.
+
+### Defect 2 — missing `set -o pipefail` (confirmed by execution, then fixed)
+GitHub's default `run:` shell is `bash -e`, not `-o pipefail`. Proven by running the rendered
+script under `bash -e` with a fake `sops` that exits 128 and a fake `sudo` that consumes stdin
+and exits 0 (mimicking `kubectl apply` on empty stdin): **without** `set -o pipefail` the
+script exits **0**; **with** it the script exits **128**. So the line is load-bearing, not
+decorative. Added, with an explanatory comment.
+
+### Verification performed BY EXECUTION (not by reading)
+The step's `run:` block was extracted from the **parsed** YAML (`yaml.safe_load`, not a text
+grep), `${{ inputs.slug }}` rendered to `myapp`, and confirmed to contain zero remaining
+`${{ }}` expressions. Then executed under `bash -e` (no pipefail on the command line) with
+`K8S_DIR=k8s`, `NS=myapp-prod`, and fake `sops`/`sudo` on `PATH`:
+
+| # | Case | Observed | Exit |
+|---|------|----------|------|
+| 1 | neither file present | `::notice::No secrets.enc.yaml at … skipping` | **0** |
+| 2 | legacy only | `::warning::Using legacy app-repo secret path …` then applies legacy path | **0** |
+| 3 | both present | applies `.infra-liv11/…` , **no** `::warning::` (infra wins) | **0** |
+| 4 | `sops -d` fails, with `set -o pipefail` | fails loudly | **128** |
+| 5 | same, `set -o pipefail` removed (negative control) | silently green | **0** |
+
+Case 5 is the negative control: it differs from case 4 by exactly one deleted line
+(`wc -l` delta = 1) and flips the outcome, proving `set -o pipefail` is what makes a failed
+decrypt visible.
+
+Also executed:
+- `bash -n <rendered script>` → OK.
+- `shellcheck -s bash <rendered script>` → clean, zero findings.
+- **Step ordering from parsed YAML** (indices within `jobs.deploy-prod.steps`):
+  infra-checkout `1` < "Run DB migrations" `6` < **decrypt `7`** < "Apply prod manifests" `8`.
+  So the Secret is applied strictly before the manifests, and the infra checkout strictly
+  before the decrypt.
+- **`workflow_call` keys from parsed YAML = `['inputs']`** — no `secrets:` block was added, so
+  all 13 callers relying on `secrets: inherit` are unaffected.
+- `actionlint` (rhysd/actionlint Docker image; no local binary and no repo-native lint gate for
+  this file exists). Post-edit: 2 findings. Pre-edit baseline (`git show HEAD:` of the same
+  file, linted identically): the **same** 2 findings — the unknown custom runner label `liv11`
+  (line 458) and an SC2086 in "Apply prod manifests" (line 609 pre-edit → 679 post-edit, merely
+  shifted by my inserted lines; it is TD-840/TD-836's territory). **Zero new findings** on the
+  added lines.
+- `git status --short` → only `.github/workflows/app-release.yml` modified. No change to
+  `app-deploy-test.yml`, any per-app `release.yml`, or any ADR.
+
+### Verified BY READING only (not executed)
+- That `NPM_TOKEN` is already used by THIS workflow for exactly this repo:
+  `app-release.yml:613`, `git config --global url."https://x-access-token:${{ secrets.NPM_TOKEN }}@github.com/".insteadOf "https://github.com/"`
+  inside "Apply prod manifests" — the direct analogue of `app-deploy-test.yml:521`.
+- That every caller passes `secrets: inherit` (per the TD's own measurement; not re-measured
+  here).
+
+### Could NOT be verified in this session (named blockers)
+- **`NPM_TOKEN` specifically reading `infra-liv11`.** `git ls-remote
+  https://github.com/TradeFairs/infra-liv11 main` succeeds from this host
+  (`01e9596a77ef1703eec1b94eeae7df593e3e2630`), but that used the host's ambient git
+  credentials — `NPM_TOKEN` is not present in this environment, so this proves the repo/ref
+  exists and is reachable, NOT that `NPM_TOKEN` in particular can read it. The reading-level
+  argument (same token, same repo, same job, line 613) is strong but is not execution proof.
+  Blocker: needs a run on the liv11 runner, or an `NPM_TOKEN`-authenticated `ls-remote`.
+- **Live no-op verification** (prod dispatch for an unmigrated app) and **live decrypt
+  verification** — require dispatching a real prod release, outside a Coder's mechanical scope
+  and with no in-scope app yet shipping a prod `secrets.enc.yaml`. Note this rework makes the
+  live no-op check strictly more load-bearing than before, because the new `infra-liv11`
+  checkout step now runs on **every** prod deploy of **every** caller. Blast radius today is
+  nil: per the TD's own measurement, zero callers reference the tag containing this step.
+- **Negative key verification** (prod file must not decrypt with the test key) — impossible
+  today: `infra-liv11:origin/main` has no `environments/` directory at all, and the operator
+  has not yet minted a second per-environment age key. Deferred with that named blocker rather
+  than claimed. This TD does not undermine the property: no `SOPS_AGE_KEY_FILE` pinning and no
+  `--age`/recipient flag were added.
+- `sops --version` / age-key presence in the `deploy-prod` job's context (original Step 2) —
+  not runnable from here; needs the liv11 runner.
+
+### AC status, stated plainly
+Met and proven by execution: infra checkout with non-default `path:` and no `secrets:` block;
+infra-first resolution with `::warning::` fallback; Secret applied before manifests; failing
+`sops -d` fails the step; no caller ref bumped; step present and correctly positioned; no other
+workflow touched. Left **unchecked** on purpose: the two live-dispatch criteria and the
+negative-key criterion, each with the named blocker above. I am not claiming any of those three.
 
 ### Follow-ups
-- Medium: Live verification of both the no-op skip path and the real-decrypt path (Steps 3-4,
-  AC items 2-3) still needs to happen against an actual prod dispatch before this can be
-  considered fully verified — not exercised in this implementation session.
+- **High**: Live no-op verification of a prod deploy for an app with no `secrets.enc.yaml` in
+  either location — now also exercises the new `infra-liv11` checkout on every caller's prod
+  deploy. Must happen before any caller is bumped to a tag containing this step.
+- **High**: Confirm `NPM_TOKEN` can actually read the private `infra-liv11` from the
+  `deploy-prod` job. If it cannot, the checkout step fails and breaks every prod deploy — this
+  is the single highest-risk unproven assumption in this change.
+- **Medium**: Live decrypt verification once a per-app TD lands
+  `infra-liv11/environments/prod/<app>/secrets.enc.yaml`.
+- **Medium**: Negative key verification, blocked on the operator minting a separate per-environment
+  age key and on the `bvv-platform:TD-1090`..`TD-1095` batch creating `environments/`.
+- **Low**: The fleet-wide caller `uses:` bump to a tag containing the fixed step is explicitly
+  separate work and remains outstanding.
 
 ### Severity (povinné pro každý nález)
 | Úroveň | Definice |
