@@ -289,6 +289,30 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Checkout infra-liv11 (cluster-specific SOPS material, ADR-082)
+        # ADR-082: SOPS material for a cluster lives in that cluster's infra repo
+        # at `environments/{prod,test}/<app>/secrets.enc.yaml`, so the decrypt
+        # step below needs infra-liv11 IN THE WORKSPACE — this job otherwise only
+        # ever consumes infra-liv11 as a remote kustomize base (Apply manifests).
+        #
+        # `path:` is MANDATORY: a default-path checkout would overwrite the
+        # caller's own checkout above and break every later step.
+        #
+        # `NPM_TOKEN`, not `GITHUB_TOKEN`: infra-liv11 is PRIVATE and
+        # `GITHUB_TOKEN` is scoped to the caller's own repo, so it cannot read
+        # it. `NPM_TOKEN` is org-scoped, exists in every caller repo, and is
+        # already used by THIS job for exactly this repo (the remote kustomize
+        # base url-rewrite in "Apply manifests"). It reaches this reusable
+        # workflow because every caller passes `secrets: inherit` — the
+        # `workflow_call` block deliberately declares NO `secrets:` section, and
+        # adding one would break every existing caller.
+        uses: actions/checkout@v5
+        with:
+          repository: TradeFairs/infra-liv11
+          path: .infra-liv11
+          ref: main
+          token: ${{ secrets.NPM_TOKEN }}
+
       - name: Resolve test namespace from overlay
         # The kustomize `namespace:` directive in overlays/test is the canonical target
         # namespace — `kubectl apply -f` (below) honours it, so the verify/rollout steps
@@ -432,19 +456,57 @@ jobs:
           cat kustomization.yaml
 
       - name: Decrypt and apply SOPS secret (if migrated)
-        # ADR-013 (SOPS+age secrets management) / TD-841: decrypt-and-apply, gated
-        # purely on file presence. Placed BEFORE "Apply manifests" — the Secret
-        # must exist before the Deployment referencing it is applied, otherwise a
-        # fresh-migration app's first rollout would fail on a missing Secret. For
-        # the 13 apps that haven't migrated yet this file simply doesn't exist in
-        # their checked-out repo, so this step is a clean no-op: today's manual
-        # Secret-application deploy behavior is completely unchanged for them.
+        # ADR-082 (amends ADR-013): SOPS material is cluster-specific config and
+        # lives in `infra-<cluster>`, at
+        # `environments/{prod,test}/<app>/secrets.enc.yaml`, with `.sops.yaml` per
+        # ENVIRONMENT (not per repo) so each environment has its own age key.
+        # TD-841 rework 2026-08-24: the originally shipped step read
+        # `$K8S_DIR/overlays/test/secrets.enc.yaml`, a path relative to the
+        # CALLING app repo's checkout — infra-liv11 is never in that checkout
+        # (this job consumes it only as a remote kustomize base). With the secret
+        # in infra-liv11 that `-f` test is simply false, so the step took the
+        # skip branch and the deploy went green having applied NO Secret. Hence
+        # the dedicated `.infra-liv11` checkout above and the infra-first
+        # resolution below.
+        #
+        # Resolution order is deliberate: once an app is migrated, infra-liv11 is
+        # authoritative and a stale leftover copy in the app repo must not win.
+        # The legacy app-repo path stays honoured (with a ::warning:: so the
+        # transitional state is visible, not silent) until PLAN-250 wave 1
+        # completes.
+        #
+        # Gated purely on file presence. Placed BEFORE "Apply manifests" — the
+        # Secret must exist before the Deployment referencing it is applied,
+        # otherwise a fresh-migration app's first rollout would fail on a missing
+        # Secret. For apps that haven't migrated yet NEITHER file exists, so this
+        # step is a clean no-op: today's manual Secret-application deploy
+        # behavior is completely unchanged for them.
+        #
+        # No `SOPS_AGE_KEY_FILE` pinning and no `--age`/recipient flag: `sops -d`
+        # selects the private key by matching the file's own recipients against
+        # the keys available to the runner. Pinning a key here would silently
+        # defeat the per-environment key separation ADR-082 requires.
         run: |
-          SECRET_FILE="$K8S_DIR/overlays/test/secrets.enc.yaml"
-          if [ -f "$SECRET_FILE" ]; then
+          # `pipefail` so a failing `sops -d` (wrong/absent key) fails the STEP.
+          # Without it the pipeline's exit status is `kubectl apply`'s, which
+          # happily succeeds on empty stdin — i.e. "secret not applied" would be
+          # another silent green. See TD-841 R4.
+          set -o pipefail
+          INFRA_SECRET=".infra-liv11/environments/test/${{ inputs.slug }}/secrets.enc.yaml"
+          LEGACY_SECRET="$K8S_DIR/overlays/test/secrets.enc.yaml"
+          if [ -f "$INFRA_SECRET" ]; then
+            SECRET_FILE="$INFRA_SECRET"
+          elif [ -f "$LEGACY_SECRET" ]; then
+            SECRET_FILE="$LEGACY_SECRET"
+            echo "::warning::Using legacy app-repo secret path $LEGACY_SECRET — migrate to infra-liv11/environments/test/${{ inputs.slug }}/ (ADR-082)"
+          else
+            SECRET_FILE=""
+          fi
+          if [ -n "$SECRET_FILE" ]; then
+            echo "Applying SOPS secret from $SECRET_FILE"
             sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f -
           else
-            echo "::notice::$SECRET_FILE not present — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
+            echo "::notice::No secrets.enc.yaml at $INFRA_SECRET or $LEGACY_SECRET — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
           fi
 
       - name: Apply manifests
