@@ -3,7 +3,10 @@
 #   preflight (SNAPSHOT + semver) → bump+commit+tag → build prod image →
 #   deploy-prod (k3s ctr pull, PLAN-047) → bump to next SNAPSHOT → push + GH Release.
 # Prod images are REBUILT (build-arg NEXT_PUBLIC_BVV_ENV=production differs from
-# test) — ADR-034 promotion is test-only/out-of-scope for release.
+# test) — ADR-034 promotion is test-only/out-of-scope for release. HOW they are
+# rebuilt is selected by `imageStrategy`: docker (default, buildx from the app
+# Dockerfile) or crane (ADR-083 krok 5b — monorepo-only layer-append via the
+# caller-local .github/actions/release-crane-image composite).
 # Trigger stays in the caller (PLAN-105 D7): the caller is a thin workflow_dispatch
 # that passes releaseVersion + nextVersion and `uses:` this workflow.
 # Callers: TradeFairs/<app>/.github/workflows/release.yml
@@ -81,6 +84,21 @@ on:
           it stays pinned to the literal `[self-hosted, liv11]` label.
         type: string
         default: '"ubuntu-latest"'
+      imageStrategy:
+        description: >-
+          How the prod image is built (ADR-083 krok 5b, k8s-workspace):
+          `docker` (default — buildx build from the app Dockerfile,
+          byte-identical to today for every existing caller) | `crane`
+          (turbo-builds the app directly on the runner and appends the Next
+          standalone output onto the pinned bvv-app-base, via the
+          CALLER-LOCAL composite `.github/actions/release-crane-image`).
+          That composite exists only in TradeFairs/bvv-platform — it owns
+          the INVENTORY per-app data (migrate deps, runtime dirs, base-image
+          pin) this workflow deliberately knows nothing about — so only the
+          monorepo may opt in; a standalone caller passing `crane` fails at
+          the `uses:` resolution, loudly, not silently.
+        type: string
+        default: 'docker'
 
 permissions:
   contents: write
@@ -182,7 +200,21 @@ jobs:
           fi
           exit 0
 
+      - name: Validate imageStrategy
+        run: |
+          case "${{ inputs.imageStrategy }}" in
+            docker|crane) ;;
+            *) echo "::error::imageStrategy must be 'docker' or 'crane', got '${{ inputs.imageStrategy }}'"; exit 1 ;;
+          esac
+
+      # ── Docker image path (imageStrategy: docker — every standalone caller) ──
+      # The three buildx/build-push steps below are gated as a unit; the crane
+      # path replaces exactly them (same position in the ceremony: after the
+      # release-version bump, before the SNAPSHOT bump) and nothing else.
+      # `docker/login-action` stays UNGATED — crane reads the same
+      # ~/.docker/config.json credential.
       - name: Compute buildx driver-opts + build-args (self-hosted proxy passthrough)
+        if: inputs.imageStrategy == 'docker'
         # TD-280: see app-ci.yml for the full rationale — the buildx
         # docker-container driver's builder doesn't inherit this job's proxy
         # env, so forward it dynamically (empty on ubuntu-latest, no-op there).
@@ -224,6 +256,7 @@ jobs:
           fi
 
       - uses: docker/setup-buildx-action@v4
+        if: inputs.imageStrategy == 'docker'
         with:
           driver: ${{ steps.buildx_opts.outputs.driver }}
           driver-opts: ${{ steps.buildx_opts.outputs.driver == '' && steps.buildx_opts.outputs.opts || '' }}
@@ -251,6 +284,7 @@ jobs:
           git tag -a "$RELEASE_TAG" -m "Release ${{ inputs.releaseVersion }}"
 
       - name: Build and push prod image
+        if: inputs.imageStrategy == 'docker'
         uses: docker/build-push-action@v7
         with:
           # TD-821: the DOCKERFILE follows `appPath`; the BUILD CONTEXT does not
@@ -295,6 +329,26 @@ jobs:
           # unchanged — genuinely needs registry cache, ephemeral VM per release.
           cache-from: ${{ !contains(inputs.ciRunsOn, 'self-hosted') && format('type=registry,ref=ghcr.io/tradefairs/{0}:buildcache', inputs.slug) || '' }}
           cache-to: ${{ !contains(inputs.ciRunsOn, 'self-hosted') && format('type=registry,ref=ghcr.io/tradefairs/{0}:buildcache,mode=max', inputs.slug) || '' }}
+
+      # ── Crane image path (imageStrategy: crane — ADR-083 krok 5b) ────────────
+      # Same ceremony position as the docker step above: runs AFTER "Bump to
+      # release version" (so apps/<slug>/package.json already reads
+      # releaseVersion) and pushes the SAME two tags
+      # (ghcr.io/tradefairs/<slug>:<releaseVersion> + :latest), so the
+      # deploy-prod job's `ctr pull $IMAGE:$IMAGE_TAG` is untouched. The
+      # composite lives in the CALLER's checkout (monorepo-only) and owns all
+      # per-app detail: INVENTORY lookup, pnpm/turbo prod-profile build,
+      # crane append onto the pinned bvv-app-base. `secrets: inherit` already
+      # delivers NPM_TOKEN (ghcr login + @tradefairs npm scope).
+      - name: Build and push prod image (crane layer-append)
+        if: inputs.imageStrategy == 'crane'
+        uses: ./.github/actions/release-crane-image
+        with:
+          app: ${{ inputs.slug }}
+          base-path: ${{ inputs.basePath }}
+          release-version: ${{ inputs.releaseVersion }}
+          git-commit: ${{ github.sha }}
+          npm-token: ${{ secrets.NPM_TOKEN }}
 
       - name: Bump to next SNAPSHOT
         run: |
