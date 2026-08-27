@@ -675,6 +675,25 @@ jobs:
             echo "::notice::No secrets.enc.yaml at $INFRA_SECRET or $LEGACY_SECRET — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
           fi
 
+      - name: Apply plaintext config (if migrated)
+        # Design doc `config-as-code-target-state` (platform-workspace
+        # docs/design/): non-secret env-bound values live NEXT TO the SOPS
+        # material as a plain ConfigMap manifest — plaintext in git, so
+        # `git log -p` answers "when did SYNC_CRON change". A key lives in
+        # exactly ONE of config.yaml / secrets.enc.yaml, never both. Gated
+        # purely on file presence; placed BEFORE "Apply prod manifests" for the
+        # same reason as the Secret above (the Deployment's envFrom must
+        # resolve). The Deployment's configMapRef is `optional: true`, so
+        # un-migrated environments of a migrated app keep working.
+        run: |
+          INFRA_CONFIG=".infra-liv11/environments/prod/${{ inputs.slug }}/config.yaml"
+          if [ -f "$INFRA_CONFIG" ]; then
+            echo "Applying plaintext config from $INFRA_CONFIG"
+            sudo kubectl apply -n "$NS" -f "$INFRA_CONFIG"
+          else
+            echo "::notice::No config.yaml at $INFRA_CONFIG — skipping (no plaintext config for this app/env)"
+          fi
+
       - name: Apply prod manifests
         run: |
           # render-then-apply (PLAN-104 X2): kubectl kustomize as runner user (with
