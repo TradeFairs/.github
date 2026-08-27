@@ -450,9 +450,22 @@ jobs:
 
           echo "Waiting for td-linkage-pr-gate to report a conclusion on PR #$PR_NUMBER..."
           BUCKET=""
+          GATE_PRESENT=""
+          CHECK_COUNT=0
           for i in $(seq 1 60); do
-            BUCKET=$(gh pr checks "$PR_NUMBER" --repo "${{ github.repository }}" --json name,bucket \
-              --jq '.[] | select(.name == "td-linkage-pr-gate") | .bucket' 2>/dev/null || true)
+            # Read the check list ONCE per iteration and derive two facts from that
+            # single snapshot. A lone `select(.name == ...) | .bucket` yields an
+            # empty string for BOTH "gate absent" and "gate present but pending",
+            # and those need opposite handling (see the absent-gate note below).
+            # An API failure leaves CHECKS_JSON empty, which is treated as "unknown,
+            # keep polling" — never as "absent".
+            CHECKS_JSON=$(gh pr checks "$PR_NUMBER" --repo "${{ github.repository }}" --json name,bucket 2>/dev/null || true)
+            if [ -n "$CHECKS_JSON" ]; then
+              GATE_PRESENT=$(printf '%s' "$CHECKS_JSON" | jq -r 'any(.[]; .name == "td-linkage-pr-gate")' 2>/dev/null || echo "")
+              BUCKET=$(printf '%s' "$CHECKS_JSON" | jq -r 'map(select(.name == "td-linkage-pr-gate")) | .[0].bucket // ""' 2>/dev/null || true)
+              CHECK_COUNT=$(printf '%s' "$CHECKS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+            fi
+
             if [ "$BUCKET" = "pass" ]; then
               echo "td-linkage-pr-gate: pass"
               break
@@ -460,10 +473,40 @@ jobs:
               echo "::error::td-linkage-pr-gate reported bucket='$BUCKET' on release-bump PR #$PR_NUMBER ($PR_URL) — refusing to merge. This must be a visible release failure, not a silent skip."
               exit 1
             fi
+
+            # An ABSENT gate is not a PENDING gate. `td-linkage-pr-gate.yml` survives
+            # only as subtree-merged copies under `apps/<slug>/.github/workflows/`
+            # (from the standalone repos archived by the ADR-071 consolidation), and
+            # GitHub reads workflows only from the repo ROOT — so in the monorepo the
+            # gate never runs and its bucket stays empty forever. Polling that to the
+            # 10-minute timeout is not a guard, it is a hang: it failed the
+            # bvv-directory-web 0.16.0 release on 2026-08-27 after the image was
+            # already built and the tag already pushed.
+            #
+            # Verified the same day: bvv-platform/main has NO required status checks
+            # and NO rulesets, so nothing requires this check to report. The TD-825
+            # comment on the "Open release-bump PR" step above ("bvv-platform/main
+            # requires the td-linkage-pr-gate status check") is stale on that point.
+            # The release-bump PR itself is still required — it is how the two bump
+            # commits reach main — so that ceremony is unchanged.
+            #
+            # Guard: only skip once OTHER checks have reported. A freshly-opened PR
+            # briefly has an empty check list, which IS genuinely pending; without
+            # this condition the skip would race a gate that was merely slow to
+            # register. `pass` / `fail` / `cancel` handling above is untouched, so
+            # rehoming td-linkage-audit.mjs out of the archived k8s-workspace (and
+            # rewriting its per-repo path assumptions for monorepo subpaths) makes
+            # this branch dormant again on its own, with no further edit here.
+            if [ "$GATE_PRESENT" = "false" ] && [ "$CHECK_COUNT" -gt 0 ]; then
+              echo "::notice::td-linkage-pr-gate is not present on PR #$PR_NUMBER ($CHECK_COUNT other checks reported) — no workflow provides it in this repo and no branch rule requires it. Treating as not-applicable and proceeding to merge."
+              BUCKET="absent"
+              break
+            fi
+
             echo "Attempt $i/60: gate bucket='${BUCKET:-pending}', waiting 10s..."
             sleep 10
           done
-          if [ "$BUCKET" != "pass" ]; then
+          if [ "$BUCKET" != "pass" ] && [ "$BUCKET" != "absent" ]; then
             echo "::error::td-linkage-pr-gate did not reach a passing bucket on PR #$PR_NUMBER ($PR_URL) within the poll window (bucket='${BUCKET:-pending}') — refusing to merge."
             exit 1
           fi
