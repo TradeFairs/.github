@@ -1,4 +1,9 @@
 # app-deploy-test.yml — reusable deploy-to-test workflow (ADR-023 §K.2).
+# Happy path is ADR-034 promotion (retag the PR image, no build). When no PR
+# image exists (mainly workflow_dispatch), the FALLBACK rebuild path is
+# selected by `imageStrategy`: docker (default, buildx from the app
+# Dockerfile) | crane (layer-append via the caller-local
+# .github/actions/deploy-test-crane-image composite) — ADR-083 krok 5c.
 # build job runs on GitHub-hosted runner (internet access for ghcr.io push).
 # deploy job runs on self-hosted runner (direct kubectl access to k3s on liv11).
 # Callers: TradeFairs/<app>/.github/workflows/deploy-test.yml (uses: TradeFairs/.github/.github/workflows/app-deploy-test.yml@main)
@@ -45,6 +50,26 @@ on:
           `bvv-platform` monorepo (ADR-071 step 4+, not in scope here).
         type: string
         default: ''
+      imageStrategy:
+        description: >-
+          How the FALLBACK test image is built when no PR image was found to
+          promote (ADR-083 krok 5c, k8s-workspace): `docker` (default — buildx
+          build from the app Dockerfile, byte-identical to today for every
+          existing caller) | `crane` (layer-append onto the pinned
+          bvv-app-base via the CALLER-LOCAL composite
+          `.github/actions/deploy-test-crane-image`).
+
+          This input does NOT affect the happy path: when a PR image exists it
+          is promoted by retag (ADR-034), no build of either kind happens.
+          It only selects which way the fallback rebuild goes — in practice
+          the `workflow_dispatch` path, which has no PR to promote from.
+
+          That composite exists only in TradeFairs/bvv-platform (it resolves
+          per-app data from that repo's INVENTORY), so only the monorepo may
+          opt in; a standalone caller passing `crane` fails at the `uses:`
+          resolution, loudly, not silently.
+        type: string
+        default: 'docker'
       require_pr_image:
         description: >-
           Scoped opt-in (TD-684, operator decision 2026-08-17): when `true`,
@@ -84,6 +109,13 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Validate imageStrategy
+        run: |
+          case "${{ inputs.imageStrategy }}" in
+            docker|crane) ;;
+            *) echo "::error::imageStrategy must be 'docker' or 'crane', got '${{ inputs.imageStrategy }}'"; exit 1 ;;
+          esac
+
       - name: Compute buildx driver-opts + build-args (self-hosted proxy passthrough)
         # TD-280: see app-ci.yml for the full rationale — the buildx
         # docker-container driver's builder doesn't inherit this job's proxy
@@ -96,6 +128,14 @@ jobs:
         # docker-container driver's per-job throwaway builder never persisted
         # cache across jobs/runners).
         id: buildx_opts
+        # ADR-083 krok 5c: driver-opts/build-args slouzi VYHRADNE docker
+        # fallback buildu nize, takze se pri crane strategii nepocitaji.
+        # `docker/setup-buildx-action` nize ale gatovane ZAMERNE NENI:
+        # `Promote PR image` (happy path, obe strategie) vola
+        # `docker buildx imagetools create`, ktere potrebuje buildx CLI
+        # plugin. Gatovat setup by rozbilo promotion na runnerech, kde buildx
+        # neni predinstalovany — a to je hlavni cesta, ne fallback.
+        if: inputs.imageStrategy == 'docker'
         shell: bash
         run: |
           # opts<<EOF/EOF and build_args<<EOF/EOF below are safe only because
@@ -125,6 +165,10 @@ jobs:
             echo "driver=" >> "$GITHUB_OUTPUT"
           fi
 
+      # ADR-083 krok 5c: ZAMERNE negatovane — `Promote PR image` (happy path
+      # obou strategii) vola `docker buildx imagetools create`. Pri crane
+      # strategii je krok `buildx_opts` vyse preskoceny, takze obe hodnoty
+      # nize jsou prazdne = default chovani akce (auto driver, zadne opts).
       - uses: docker/setup-buildx-action@v4
         with:
           driver: ${{ steps.buildx_opts.outputs.driver }}
@@ -219,8 +263,9 @@ jobs:
           docker buildx imagetools create -t "$IMAGE:$IMAGE_TAG" -t "$IMAGE:test" "$IMAGE:pr-$PR_SHA"
           echo "Promoted $IMAGE:pr-$PR_SHA → $IMAGE:$IMAGE_TAG and :test"
 
+      # ── Docker fallback path (imageStrategy: docker — every standalone caller) ──
       - name: Build and push test image (fallback — no PR image found)
-        if: steps.pr_image.outputs.image_found != 'true'
+        if: steps.pr_image.outputs.image_found != 'true' && inputs.imageStrategy == 'docker'
         uses: docker/build-push-action@v7
         with:
           # TD-821: the DOCKERFILE follows `appPath`; the BUILD CONTEXT does not
@@ -263,6 +308,23 @@ jobs:
           cache-to: |
             type=registry,ref=ghcr.io/tradefairs/${{ inputs.slug }}:buildcache,mode=max
             type=inline
+
+      # ── Crane fallback path (imageStrategy: crane — ADR-083 krok 5c) ─────────
+      # Tentyz fallback, jen layer-append misto Docker buildu. Composite je
+      # caller-lokalni (zije jen v TradeFairs/bvv-platform) a drzi vsechna
+      # per-app data — sdileny workflow o nich nevi, takze se meni bez noveho
+      # tagu tohohle repa. Tag predavame explicitne, aby byl identicky s tim,
+      # co by pushnul docker fallback vyse: deploy job nize dela `ctr pull`
+      # prave na `needs.build.outputs.image_tag`.
+      - name: Build and push test image (fallback — crane layer-append)
+        if: steps.pr_image.outputs.image_found != 'true' && inputs.imageStrategy == 'crane'
+        uses: ./.github/actions/deploy-test-crane-image
+        with:
+          app: ${{ inputs.slug }}
+          base-path: ${{ inputs.basePath }}
+          image-tag: ${{ steps.version.outputs.image_tag }}
+          git-commit: ${{ github.sha }}
+          npm-token: ${{ secrets.NPM_TOKEN }}
 
   # ── 2. Deploy to <slug>-test namespace ──────────────────────────────────────
   deploy:
