@@ -99,6 +99,17 @@ on:
           the `uses:` resolution, loudly, not silently.
         type: string
         default: 'docker'
+      loadRestrictor:
+        description: >-
+          Extra flag passed to `kubectl kustomize` when rendering the prod
+          overlay (PLAN-250 krok 4). Default `''` = today's exact behavior for
+          every caller. The only intended value is
+          `--load-restrictor=LoadRestrictionsNone`, needed by `jira-status`,
+          whose configMapGenerator reads `../../notification_rules.yaml` from
+          outside `k8s/`. Do NOT set it fleet-wide: the default restrictor is
+          what keeps an overlay from silently reaching into arbitrary files.
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -599,8 +610,15 @@ jobs:
           ref: main
           token: ${{ secrets.NPM_TOKEN }}
 
-      - name: Resolve prod namespace from overlay
-        # The kustomize `namespace:` directive in overlays/prod is the canonical target
+      - name: Resolve overlay dir and prod namespace
+        # PLAN-250 krok 4: the prod overlay moves out of the app repo into
+        # infra-liv11 `environments/prod/<slug>/` (the app must not know where it
+        # is installed). Resolution is infra-first with a legacy fallback — the
+        # same shape the SOPS secret step already uses — so this workflow change
+        # merges as a NO-OP: with zero apps migrated every app takes the legacy
+        # branch and only emits a warning.
+        #
+        # The kustomize `namespace:` directive in the overlay is the canonical target
         # namespace — `kubectl apply -f` (below) honours it, so the verify/rollout steps
         # must use the SAME namespace, not assume slug. Co-located apps (e.g.
         # jira-status-web → `jira-status`) set a non-slug namespace here; deriving it
@@ -615,14 +633,23 @@ jobs:
         # than let `awk` return empty, silently fall back to the slug namespace
         # and deploy somewhere unintended (TD-817 AC-3, ADR-071 §10).
         run: |
-          if [ ! -f "$K8S_DIR/overlays/prod/kustomization.yaml" ]; then
-            echo "::error::$K8S_DIR/overlays/prod/kustomization.yaml not found — appPath='${APP_PATH}' does not resolve to an app directory in this repo. Refusing to deploy."
+          INFRA_OVERLAY=".infra-liv11/environments/prod/${{ inputs.slug }}"
+          LEGACY_OVERLAY="$K8S_DIR/overlays/prod"
+          if [ -f "$INFRA_OVERLAY/kustomization.yaml" ]; then
+            OVERLAY_DIR="$INFRA_OVERLAY"
+            echo "Overlay: infra-liv11 (migrated) — $OVERLAY_DIR"
+          elif [ -f "$LEGACY_OVERLAY/kustomization.yaml" ]; then
+            OVERLAY_DIR="$LEGACY_OVERLAY"
+            echo "::warning::Using legacy in-app overlay $LEGACY_OVERLAY — migrate to infra-liv11 environments/prod/${{ inputs.slug }}/ (PLAN-250 krok 4)"
+          else
+            echo "::error::No kustomization.yaml at $INFRA_OVERLAY or $LEGACY_OVERLAY — appPath='${APP_PATH}' does not resolve to an app directory in this repo. Refusing to deploy."
             exit 1
           fi
-          NS=$(awk '/^namespace:[[:space:]]/{print $2; exit}' "$K8S_DIR/overlays/prod/kustomization.yaml")
+          NS=$(awk '/^namespace:[[:space:]]/{print $2; exit}' "$OVERLAY_DIR/kustomization.yaml")
           NS=${NS:-${{ inputs.slug }}}
+          echo "OVERLAY_DIR=$OVERLAY_DIR" >> "$GITHUB_ENV"
           echo "NS=$NS" >> "$GITHUB_ENV"
-          echo "Resolved prod namespace from $K8S_DIR/overlays/prod: $NS"
+          echo "Resolved prod namespace from $OVERLAY_DIR: $NS"
 
       - name: Free Docker disk space
         run: sudo docker system prune -f
@@ -792,20 +819,38 @@ jobs:
           fi
 
       - name: Apply prod manifests
+        env:
+          LOAD_RESTRICTOR: ${{ inputs.loadRestrictor }}
         run: |
           # render-then-apply (PLAN-104 X2): kubectl kustomize as runner user (with
           # NPM_TOKEN url-rewrite for any private remote base), then sudo apply the
-          # static manifests. Works with inline OR remote k8s base.
+          # static manifests. Works with inline OR remote k8s base. Once an overlay
+          # is migrated it lives inside the .infra-liv11 checkout and references
+          # k8s-base by LOCAL path — its render is offline and the rewrite is then a
+          # harmless no-op (kept until the last app is migrated).
           git config --global url."https://x-access-token:${{ secrets.NPM_TOKEN }}@github.com/".insteadOf "https://github.com/"
-          # TD-821: overlay path follows `appPath` via K8S_DIR — empty appPath
-          # yields the literal `k8s/overlays/prod` used today, at both the `cd`
-          # and the render.
-          cd "$K8S_DIR/overlays/prod"
-          kubectl kustomize edit set image ghcr.io/tradefairs/${{ inputs.slug }}=ghcr.io/tradefairs/${{ inputs.slug }}:$IMAGE_TAG 2>/dev/null || \
-            sed -i "s/newTag: .*/newTag: $IMAGE_TAG/" kustomization.yaml
+          # $OVERLAY_DIR is resolved above (infra-liv11 if migrated, app repo otherwise).
+          #
+          # NOTE: this previously tried `kubectl kustomize edit set image ... || sed`.
+          # That command does not exist (`kubectl kustomize` takes a path, there is
+          # no `edit` subcommand), so the fleet ALWAYS fell through to the sed —
+          # silently, because stderr was discarded. Dead half removed; the sed is
+          # now the only path and is asserted to have taken effect.
+          cd "$OVERLAY_DIR"
+          if ! grep -q '^[[:space:]]*newTag:' kustomization.yaml; then
+            echo "::error::$OVERLAY_DIR/kustomization.yaml has no 'newTag:' line — cannot set image tag. Refusing to deploy."
+            exit 1
+          fi
+          sed -i "s/newTag: .*/newTag: $IMAGE_TAG/" kustomization.yaml
+          if ! grep -q "newTag: $IMAGE_TAG" kustomization.yaml; then
+            echo "::error::Failed to set newTag to $IMAGE_TAG in $OVERLAY_DIR/kustomization.yaml"
+            exit 1
+          fi
           cat kustomization.yaml
           cd "$GITHUB_WORKSPACE"
-          kubectl kustomize "$K8S_DIR/overlays/prod/" > /tmp/${{ inputs.slug }}-prod-manifests.yaml
+          # LOAD_RESTRICTOR is empty for every app except those whose base loads files
+          # from outside k8s/ (jira-status: configMapGenerator on ../../notification_rules.yaml).
+          kubectl kustomize ${LOAD_RESTRICTOR:-} "$OVERLAY_DIR/" > /tmp/${{ inputs.slug }}-prod-manifests.yaml
           sudo kubectl apply -f /tmp/${{ inputs.slug }}-prod-manifests.yaml
 
       - name: Wait for rollout (with retry)
