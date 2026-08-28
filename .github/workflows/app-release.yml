@@ -110,6 +110,26 @@ on:
           what keeps an overlay from silently reaching into arbitrary files.
         type: string
         default: ''
+      deployOnly:
+        description: >-
+          Skip the whole `release` job (preflight, version bump, tag, image
+          build, bump PR, GitHub Release) and run ONLY `deploy-prod` for a
+          release tag that ALREADY EXISTS. For recovering a release whose
+          artifacts were produced but whose deploy never ran — the exact
+          situation left by the mergeStateStatus bug fixed in this file
+          (bvv-portal 0.3.0, 2026-08-28: tag + image pushed, deploy-prod
+          skipped because the bump PR could not be merged).
+
+          `nextVersion` is ignored in this mode (nothing is bumped) but stays
+          required by `workflow_call` — pass the value already on main.
+          `deploy-prod` is self-contained: it derives everything from
+          `releaseVersion` (image tag + `ref:` of the checkout), so it does
+          not depend on any output of the skipped job.
+
+          NOT a way to skip the release ceremony for a NEW version: with no
+          matching tag the checkout fails loudly.
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -121,6 +141,7 @@ concurrency:
 
 jobs:
   release:
+    if: ${{ !inputs.deployOnly }}
     runs-on: ${{ fromJSON(inputs.ciRunsOn) }}
     timeout-minutes: 30
     env:
@@ -437,13 +458,39 @@ jobs:
           echo "pr-number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
           echo "Opened release-bump PR: $PR_URL"
 
-      - name: Wait for td-linkage-pr-gate and merge release-bump PR
-        # Poll rather than assume synchronous completion — the gate is a
-        # real CI job (observed couple-minutes range elsewhere in the
-        # fleet), not an instant check. Fail the job LOUDLY (non-zero
-        # exit) on any failure/timeout rather than silently skipping
-        # deploy-prod — a release failure must be visible, never a quiet
-        # no-op (k8s-workspace:TD-825 Step 1e).
+      - name: Wait for the release-bump PR to become mergeable, then merge it
+        # Poll GitHub's OWN mergeability verdict (`mergeStateStatus`) rather
+        # than any named check. Fail the job LOUDLY (non-zero exit) on any
+        # failure/timeout rather than silently skipping deploy-prod — a
+        # release failure must be visible, never a quiet no-op
+        # (k8s-workspace:TD-825 Step 1e).
+        #
+        # ── Why this no longer polls td-linkage-pr-gate by name ──────────────
+        # The previous implementation waited for the check NAMED
+        # `td-linkage-pr-gate` and, on finding it absent, merged immediately.
+        # Its justification was verified-true on 2026-08-27: "bvv-platform/main
+        # has NO required status checks and NO rulesets". ADR-083 krok 4 made
+        # `ci-required` a required status check on bvv-platform/main on
+        # 2026-08-28 — and the comment, not the code, was what held the
+        # assumption. The result was deterministic, not a race: the step saw
+        # the gate absent ~12s after opening the PR, called `gh pr merge`, and
+        # GitHub refused with "the base branch policy prohibits the merge"
+        # because `ci-required` had not reported yet (it finished 15 minutes
+        # later). bvv-portal 0.3.0 was tagged and its image pushed, but
+        # deploy-prod never ran.
+        #
+        # `mergeStateStatus` is the branch-protection verdict itself, so this
+        # loop needs no knowledge of which checks exist or what they are
+        # called, and survives any future change to branch protection:
+        #   CLEAN     — mergeable, all required checks green      → merge
+        #   UNSTABLE  — mergeable; only NON-required checks failing/pending
+        #               (a required check still pending reports BLOCKED, not
+        #               UNSTABLE) → merge
+        #   BLOCKED   — required check pending or failing, or review required
+        #   BEHIND    — base moved; needs an update branch
+        #   DIRTY     — merge conflict
+        #   UNKNOWN   — GitHub is still computing mergeability
+        # BLOCKED/BEHIND/UNKNOWN are polled (transient); DIRTY fails fast.
         #
         # Plain merge commit (`--merge`, not `--squash`): squash-merging
         # rewrites the commit SHA, which would force re-deriving the
@@ -459,66 +506,34 @@ jobs:
           PR_NUMBER="${{ steps.bump_pr.outputs.pr-number }}"
           PR_URL="${{ steps.bump_pr.outputs.pr-url }}"
 
-          echo "Waiting for td-linkage-pr-gate to report a conclusion on PR #$PR_NUMBER..."
-          BUCKET=""
-          GATE_PRESENT=""
-          CHECK_COUNT=0
+          echo "Waiting for PR #$PR_NUMBER to become mergeable..."
+          # 60 × 20s = 20 minutes. Sized against the required check it is
+          # actually waiting for: `ci-required` on bvv-platform took ~16
+          # minutes on the run that exposed this bug, so a 10-minute window
+          # would have failed a perfectly healthy release.
+          STATE=""
           for i in $(seq 1 60); do
-            # Read the check list ONCE per iteration and derive two facts from that
-            # single snapshot. A lone `select(.name == ...) | .bucket` yields an
-            # empty string for BOTH "gate absent" and "gate present but pending",
-            # and those need opposite handling (see the absent-gate note below).
-            # An API failure leaves CHECKS_JSON empty, which is treated as "unknown,
-            # keep polling" — never as "absent".
-            CHECKS_JSON=$(gh pr checks "$PR_NUMBER" --repo "${{ github.repository }}" --json name,bucket 2>/dev/null || true)
-            if [ -n "$CHECKS_JSON" ]; then
-              GATE_PRESENT=$(printf '%s' "$CHECKS_JSON" | jq -r 'any(.[]; .name == "td-linkage-pr-gate")' 2>/dev/null || echo "")
-              BUCKET=$(printf '%s' "$CHECKS_JSON" | jq -r 'map(select(.name == "td-linkage-pr-gate")) | .[0].bucket // ""' 2>/dev/null || true)
-              CHECK_COUNT=$(printf '%s' "$CHECKS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
-            fi
+            # An API failure leaves STATE empty, which is treated as "unknown,
+            # keep polling" — never as "mergeable".
+            STATE=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" \
+                      --json mergeStateStatus --jq '.mergeStateStatus // ""' 2>/dev/null || true)
 
-            if [ "$BUCKET" = "pass" ]; then
-              echo "td-linkage-pr-gate: pass"
-              break
-            elif [ "$BUCKET" = "fail" ] || [ "$BUCKET" = "cancel" ]; then
-              echo "::error::td-linkage-pr-gate reported bucket='$BUCKET' on release-bump PR #$PR_NUMBER ($PR_URL) — refusing to merge. This must be a visible release failure, not a silent skip."
-              exit 1
-            fi
+            case "$STATE" in
+              CLEAN|UNSTABLE)
+                echo "PR #$PR_NUMBER is mergeable (mergeStateStatus=$STATE)"
+                break
+                ;;
+              DIRTY)
+                echo "::error::Release-bump PR #$PR_NUMBER ($PR_URL) has a merge conflict with main (mergeStateStatus=DIRTY) — refusing to merge. Resolve the conflict; the tag and image for this release already exist."
+                exit 1
+                ;;
+            esac
 
-            # An ABSENT gate is not a PENDING gate. `td-linkage-pr-gate.yml` survives
-            # only as subtree-merged copies under `apps/<slug>/.github/workflows/`
-            # (from the standalone repos archived by the ADR-071 consolidation), and
-            # GitHub reads workflows only from the repo ROOT — so in the monorepo the
-            # gate never runs and its bucket stays empty forever. Polling that to the
-            # 10-minute timeout is not a guard, it is a hang: it failed the
-            # bvv-directory-web 0.16.0 release on 2026-08-27 after the image was
-            # already built and the tag already pushed.
-            #
-            # Verified the same day: bvv-platform/main has NO required status checks
-            # and NO rulesets, so nothing requires this check to report. The TD-825
-            # comment on the "Open release-bump PR" step above ("bvv-platform/main
-            # requires the td-linkage-pr-gate status check") is stale on that point.
-            # The release-bump PR itself is still required — it is how the two bump
-            # commits reach main — so that ceremony is unchanged.
-            #
-            # Guard: only skip once OTHER checks have reported. A freshly-opened PR
-            # briefly has an empty check list, which IS genuinely pending; without
-            # this condition the skip would race a gate that was merely slow to
-            # register. `pass` / `fail` / `cancel` handling above is untouched, so
-            # rehoming td-linkage-audit.mjs out of the archived k8s-workspace (and
-            # rewriting its per-repo path assumptions for monorepo subpaths) makes
-            # this branch dormant again on its own, with no further edit here.
-            if [ "$GATE_PRESENT" = "false" ] && [ "$CHECK_COUNT" -gt 0 ]; then
-              echo "::notice::td-linkage-pr-gate is not present on PR #$PR_NUMBER ($CHECK_COUNT other checks reported) — no workflow provides it in this repo and no branch rule requires it. Treating as not-applicable and proceeding to merge."
-              BUCKET="absent"
-              break
-            fi
-
-            echo "Attempt $i/60: gate bucket='${BUCKET:-pending}', waiting 10s..."
-            sleep 10
+            echo "Attempt $i/60: mergeStateStatus='${STATE:-UNKNOWN}', waiting 20s..."
+            sleep 20
           done
-          if [ "$BUCKET" != "pass" ] && [ "$BUCKET" != "absent" ]; then
-            echo "::error::td-linkage-pr-gate did not reach a passing bucket on PR #$PR_NUMBER ($PR_URL) within the poll window (bucket='${BUCKET:-pending}') — refusing to merge."
+          if [ "$STATE" != "CLEAN" ] && [ "$STATE" != "UNSTABLE" ]; then
+            echo "::error::Release-bump PR #$PR_NUMBER ($PR_URL) did not become mergeable within the poll window (mergeStateStatus='${STATE:-UNKNOWN}') — refusing to merge. If this is BLOCKED, a required status check has not passed; check the PR."
             exit 1
           fi
 
@@ -566,6 +581,16 @@ jobs:
     runs-on: [self-hosted, liv11]
     timeout-minutes: 20
     needs: release
+    # `needs` alone would skip this job whenever `release` is skipped, so
+    # deployOnly needs `always()` to reach it. The condition is written to
+    # keep the ONLY previously-possible path intact: a FAILED or CANCELLED
+    # release must still block the deploy. Spelled out per mode:
+    #   deployOnly=false → requires release.result == 'success' (today's `needs`)
+    #   deployOnly=true  → release is 'skipped'; deploy runs off the existing tag
+    if: >-
+      ${{ always() && !cancelled() &&
+          (inputs.deployOnly && needs.release.result == 'skipped'
+           || !inputs.deployOnly && needs.release.result == 'success') }}
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
       IMAGE_TAG: ${{ inputs.releaseVersion }}
