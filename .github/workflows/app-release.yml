@@ -740,12 +740,20 @@ jobs:
           #     stateless app (6 of 13 have no migration manifest) → skip, as today.
           #   - `$K8S_DIR` does not exist at all → `appPath` is unresolvable →
           #     hard fail, never a green skip.
-          # With the default empty `appPath`, K8S_DIR is the literal `k8s` and
-          # this reduces to exactly today's two outcomes: single-app repos always
-          # have a `k8s/` directory (it is where the prod overlay just read from,
-          # one step earlier), so the directory check cannot newly fail for them.
-          if [ ! -d "$K8S_DIR" ]; then
-            echo "::error::$K8S_DIR does not exist — appPath='${APP_PATH}' does not resolve to an app directory in this repo. Refusing to skip migrations silently."
+          # 2026-08-29: the guard now tests `$APP_PATH`, not `$K8S_DIR`. The
+          # premise above — "single-app repos always have a `k8s/` directory (it
+          # is where the prod overlay just read from)" — died when the overlays
+          # moved to infra-liv11/environments/. For an app whose `k8s/` held ONLY
+          # `overlays/` (jira-status-web, bvv-portal) the directory vanished with
+          # the overlay, and this guard hard-failed a release that should have
+          # skipped: both are stateless, with no `base/` and no `job-migrate.yaml`.
+          # `$APP_PATH` is what the error message was always really asserting
+          # about ("does not resolve to an app directory"), so test that directly.
+          # Empty `appPath` → repo root → always exists → single-app repos
+          # unchanged. A missing `k8s/` now falls through to the stateless skip
+          # below, which is the correct outcome: no manifest, no migration.
+          if [ -n "$APP_PATH" ] && [ ! -d "$APP_PATH" ]; then
+            echo "::error::$APP_PATH does not exist — appPath='${APP_PATH}' does not resolve to an app directory in this repo. Refusing to skip migrations silently."
             exit 1
           fi
           # Optional: stateless apps (e.g. bvv-directory-web) have no k8s/job-migrate.yaml.
