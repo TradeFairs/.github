@@ -676,6 +676,23 @@ jobs:
           echo "NS=$NS" >> "$GITHUB_ENV"
           echo "Resolved prod namespace from $OVERLAY_DIR: $NS"
 
+      - name: Ensure namespace exists
+        # Cattle-not-pets fáze 1 (platform-workspace docs/design/cattle-not-pets.md):
+        # namespace zakládá deploy, ne SSH. Musí běžet PŘED aplikací Secretu a
+        # ConfigMapy (obě jdou s `-n "$NS"` do namespace, který u čerstvé appky
+        # ještě neexistuje — render overlaye s Namespace resourcem se aplikuje
+        # až později). `kubectl apply` na Namespace je idempotentní; u
+        # existujících appek je to no-op. Chybějící soubor = zdokumentované
+        # výjimky (ns `platform` vlastní platform/namespaces/, k2-mcp vlastní
+        # repo) nebo nemigrovaná appka — skip s notice, ne fail.
+        run: |
+          NS_FILE=".infra-liv11/environments/prod/${{ inputs.slug }}/namespace.yaml"
+          if [ -f "$NS_FILE" ]; then
+            sudo kubectl apply -f "$NS_FILE"
+          else
+            echo "::notice::No namespace.yaml at $NS_FILE — skipping (namespace owned elsewhere or app not migrated)"
+          fi
+
       - name: Free Docker disk space
         run: sudo docker system prune -f
 

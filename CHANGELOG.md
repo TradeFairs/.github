@@ -3,6 +3,16 @@
 Reusable workflow changes, newest first. `v2` is the movable major tag (PLAN-105);
 after moving it, consumers need a **fresh run** (not a rerun) to pick it up.
 
+## v2.5.6 — deploy zakládá namespace (cattle-not-pets fáze 1)
+
+- `app-deploy-test.yml` + `app-release.yml`: nový krok **Ensure namespace
+  exists** hned po resoluci overlaye — `kubectl apply -f
+  .infra-liv11/environments/<env>/<slug>/namespace.yaml`, pokud soubor existuje
+  (jinak `::notice::` skip: ns `platform`, k2-mcp, nemigrované appky). Ruční
+  SSH krok „založ namespace před prvním deployem" tím padá; u existujících
+  appek je apply no-op. Viz platform-workspace
+  `docs/design/cattle-not-pets.md` fáze 1.
+
 ## v2.1.0 — profile inputs for api-internal and admin-prod-only apps (PLAN-131 TD-224)
 
 All new inputs are optional and backward compatible — defaults reproduce the
