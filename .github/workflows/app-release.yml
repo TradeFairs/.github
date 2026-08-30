@@ -650,26 +650,26 @@ jobs:
         # keeps rollout-status/verify/smoke pointed at where the deploy actually landed.
         # Falls back to the slug when the overlay omits `namespace:` (preserves old default).
         #
-        # TD-821: the overlay path follows `appPath` via K8S_DIR (empty appPath
-        # → the literal `k8s/overlays/prod/kustomization.yaml` read today).
-        # This is also the single place that validates `appPath` resolves: the
-        # prod overlay is mandatory for every app (13/13 measured), so if it is
-        # absent the path is wrong and the deploy must fail LOUDLY here rather
+        # TD-821 / cattle-not-pets fáze 5: the overlay path no longer follows
+        # `appPath` — it is always `.infra-liv11/environments/prod/<slug>/`.
+        # This is still the single place that validates the slug resolves: the
+        # prod overlay is mandatory for every app (13/13 measured 2026-08-30),
+        # so if it is absent the deploy must fail LOUDLY here rather
         # than let `awk` return empty, silently fall back to the slug namespace
         # and deploy somewhere unintended (TD-817 AC-3, ADR-071 §10).
         run: |
-          INFRA_OVERLAY=".infra-liv11/environments/prod/${{ inputs.slug }}"
-          LEGACY_OVERLAY="$K8S_DIR/overlays/prod"
-          if [ -f "$INFRA_OVERLAY/kustomization.yaml" ]; then
-            OVERLAY_DIR="$INFRA_OVERLAY"
-            echo "Overlay: infra-liv11 (migrated) — $OVERLAY_DIR"
-          elif [ -f "$LEGACY_OVERLAY/kustomization.yaml" ]; then
-            OVERLAY_DIR="$LEGACY_OVERLAY"
-            echo "::warning::Using legacy in-app overlay $LEGACY_OVERLAY — migrate to infra-liv11 environments/prod/${{ inputs.slug }}/ (PLAN-250 krok 4)"
-          else
-            echo "::error::No kustomization.yaml at $INFRA_OVERLAY or $LEGACY_OVERLAY — appPath='${APP_PATH}' does not resolve to an app directory in this repo. Refusing to deploy."
+          # PLAN-250 krok 4 dokončen: prod overlaye žijí VÝHRADNĚ v infra-liv11
+          # (13/13 ověřeno 2026-08-30; poslední in-app overlay
+          # apps/bvv-notification-hub/k8s/overlays/prod/ byl přenesen do
+          # infra-liv11 a smazán). In-app fallback zrušen — chybějící
+          # kustomization je tvrdý fail, ne tichý přechod na legacy tvar.
+          # (cattle-not-pets fáze 5)
+          OVERLAY_DIR=".infra-liv11/environments/prod/${{ inputs.slug }}"
+          if [ ! -f "$OVERLAY_DIR/kustomization.yaml" ]; then
+            echo "::error::No kustomization.yaml at $OVERLAY_DIR — appPath='${APP_PATH}' does not resolve to a migrated app overlay. Refusing to deploy."
             exit 1
           fi
+          echo "Overlay: $OVERLAY_DIR"
           NS=$(awk '/^namespace:[[:space:]]/{print $2; exit}' "$OVERLAY_DIR/kustomization.yaml")
           NS=${NS:-${{ inputs.slug }}}
           echo "OVERLAY_DIR=$OVERLAY_DIR" >> "$GITHUB_ENV"
@@ -809,18 +809,16 @@ jobs:
         # Hence the dedicated `.infra-liv11` checkout above and the infra-first
         # resolution below.
         #
-        # Resolution order is deliberate: once an app is migrated, infra-liv11 is
-        # authoritative and a stale leftover copy in the app repo must not win.
-        # The legacy app-repo path stays honoured (with a ::warning:: so the
-        # transitional state is visible, not silent) until PLAN-250 wave 1
-        # completes.
+        # PLAN-250 wave 1 je dokončená, takže infra-liv11 je jediný zdroj:
+        # legacy app-repo cesta byla zrušena (cattle-not-pets fáze 5, 2026-08-30).
+        # Chybějící secrets.enc.yaml je teď čistý skip, ne tichý přechod na
+        # zastaralou kopii v app repu.
         #
         # Gated purely on file presence. Placed BEFORE "Apply prod manifests" —
         # the Secret must exist before the Deployment referencing it is applied,
         # otherwise a fresh-migration app's first rollout would fail on a missing
-        # Secret. For apps that haven't migrated yet NEITHER file exists, so this
-        # step is a clean no-op: today's manual Secret-application deploy
-        # behavior is completely unchanged for them.
+        # Secret. Pro appku bez secrets.enc.yaml v infra-liv11 je to čistý
+        # no-op — Secret si spravuje operátor ručně, jako dřív.
         #
         # No `SOPS_AGE_KEY_FILE` pinning and no `--age`/recipient flag: `sops -d`
         # selects the private key by matching the file's own recipients against
@@ -832,21 +830,15 @@ jobs:
           # happily succeeds on empty stdin — i.e. "secret not applied" would be
           # another silent green. See TD-842 R4.
           set -o pipefail
-          INFRA_SECRET=".infra-liv11/environments/prod/${{ inputs.slug }}/secrets.enc.yaml"
-          LEGACY_SECRET="$K8S_DIR/overlays/prod/secrets.enc.yaml"
-          if [ -f "$INFRA_SECRET" ]; then
-            SECRET_FILE="$INFRA_SECRET"
-          elif [ -f "$LEGACY_SECRET" ]; then
-            SECRET_FILE="$LEGACY_SECRET"
-            echo "::warning::Using legacy app-repo secret path $LEGACY_SECRET — migrate to infra-liv11/environments/prod/${{ inputs.slug }}/ (ADR-082)"
-          else
-            SECRET_FILE=""
-          fi
-          if [ -n "$SECRET_FILE" ]; then
+          # Legacy app-repo cesta zrušena (cattle-not-pets fáze 5): žádná appka
+          # nemá apps/*/k8s/overlays/prod/secrets.enc.yaml (ověřeno 2026-08-30,
+          # bvv-platform origin/main) a PLAN-250 wave 1 je dokončená.
+          SECRET_FILE=".infra-liv11/environments/prod/${{ inputs.slug }}/secrets.enc.yaml"
+          if [ -f "$SECRET_FILE" ]; then
             echo "Applying SOPS secret from $SECRET_FILE"
             sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f -
           else
-            echo "::notice::No secrets.enc.yaml at $INFRA_SECRET or $LEGACY_SECRET — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
+            echo "::notice::No secrets.enc.yaml at $SECRET_FILE — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
           fi
 
       - name: Apply plaintext config (if migrated)
