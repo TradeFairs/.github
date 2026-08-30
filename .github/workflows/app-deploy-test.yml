@@ -403,19 +403,17 @@ jobs:
         # than let `awk` return empty, silently fall back to `<slug>-test` and
         # deploy an image into a namespace whose manifests were never rendered.
         run: |
-          INFRA_OVERLAY=".infra-liv11/environments/test/${{ inputs.slug }}"
-          LEGACY_OVERLAY="$K8S_DIR/overlays/test"
+          # PLAN-250 krok 4 dokončen: test overlaye žijí VÝHRADNĚ v infra-liv11
+          # (ověřeno 2026-08-30 pro všech 13 appek; žádná nemá k8s/overlays/test).
+          # In-app fallback zrušen — chybějící kustomization je tvrdý fail,
+          # ne tichý přechod na legacy tvar. (cattle-not-pets fáze 5)
+          OVERLAY_DIR=".infra-liv11/environments/test/${{ inputs.slug }}"
 
-          if [ -f "$INFRA_OVERLAY/kustomization.yaml" ]; then
-            OVERLAY_DIR="$INFRA_OVERLAY"
-            echo "Overlay: infra-liv11 (migrated) — $OVERLAY_DIR"
-          elif [ -f "$LEGACY_OVERLAY/kustomization.yaml" ]; then
-            OVERLAY_DIR="$LEGACY_OVERLAY"
-            echo "::warning::Using legacy in-app overlay $LEGACY_OVERLAY — migrate to infra-liv11 environments/test/${{ inputs.slug }}/ (PLAN-250 krok 4)"
-          else
-            echo "::error::No kustomization.yaml at $INFRA_OVERLAY or $LEGACY_OVERLAY — appPath='${APP_PATH}' does not resolve to an app directory in this repo. Refusing to deploy."
+          if [ ! -f "$OVERLAY_DIR/kustomization.yaml" ]; then
+            echo "::error::No kustomization.yaml at $OVERLAY_DIR — appPath='${APP_PATH}' does not resolve to a migrated app overlay. Refusing to deploy."
             exit 1
           fi
+          echo "Overlay: $OVERLAY_DIR"
 
           NS=$(awk '/^namespace:[[:space:]]/{print $2; exit}' "$OVERLAY_DIR/kustomization.yaml")
           NS=${NS:-${{ inputs.slug }}-test}
@@ -593,11 +591,8 @@ jobs:
         # the dedicated `.infra-liv11` checkout above and the infra-first
         # resolution below.
         #
-        # Resolution order is deliberate: once an app is migrated, infra-liv11 is
-        # authoritative and a stale leftover copy in the app repo must not win.
-        # The legacy app-repo path stays honoured (with a ::warning:: so the
-        # transitional state is visible, not silent) until PLAN-250 wave 1
-        # completes.
+        # PLAN-250 wave 1 je dokončená, takže infra-liv11 je jediný zdroj:
+        # legacy app-repo cesta byla zrušena (cattle-not-pets fáze 5, 2026-08-30).
         #
         # Gated purely on file presence. Placed BEFORE "Apply manifests" — the
         # Secret must exist before the Deployment referencing it is applied,
@@ -616,21 +611,15 @@ jobs:
           # happily succeeds on empty stdin — i.e. "secret not applied" would be
           # another silent green. See TD-841 R4.
           set -o pipefail
-          INFRA_SECRET=".infra-liv11/environments/test/${{ inputs.slug }}/secrets.enc.yaml"
-          LEGACY_SECRET="$K8S_DIR/overlays/test/secrets.enc.yaml"
-          if [ -f "$INFRA_SECRET" ]; then
-            SECRET_FILE="$INFRA_SECRET"
-          elif [ -f "$LEGACY_SECRET" ]; then
-            SECRET_FILE="$LEGACY_SECRET"
-            echo "::warning::Using legacy app-repo secret path $LEGACY_SECRET — migrate to infra-liv11/environments/test/${{ inputs.slug }}/ (ADR-082)"
-          else
-            SECRET_FILE=""
-          fi
-          if [ -n "$SECRET_FILE" ]; then
+          # Legacy app-repo cesta zrušena (cattle-not-pets fáze 5): PLAN-250
+          # wave 1 je dokončená a v bvv-platform neexistuje žádný
+          # apps/*/k8s/overlays/*/secrets.enc.yaml (ověřeno 2026-08-30).
+          SECRET_FILE=".infra-liv11/environments/test/${{ inputs.slug }}/secrets.enc.yaml"
+          if [ -f "$SECRET_FILE" ]; then
             echo "Applying SOPS secret from $SECRET_FILE"
             sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f -
           else
-            echo "::notice::No secrets.enc.yaml at $INFRA_SECRET or $LEGACY_SECRET — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
+            echo "::notice::No secrets.enc.yaml at $SECRET_FILE — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
           fi
 
       - name: Apply plaintext config (if migrated)
