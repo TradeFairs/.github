@@ -3,6 +3,24 @@
 Reusable workflow changes, newest first. `v2` is the movable major tag (PLAN-105);
 after moving it, consumers need a **fresh run** (not a rerun) to pick it up.
 
+## v2.5.9 — časné guardy releasu (bare semver, existence prod namespace)
+
+- `app-release.yml` preflight: `releaseVersion` i `nextVersion` musí být holý
+  semver (`^[0-9]+\.[0-9]+\.[0-9]+$`). Vstup se `-SNAPSHOT` suffixem dřív
+  propadl až do python semver compare a shodil run kryptickým
+  `ValueError: invalid literal for int() with base 10: '2-SNAPSHOT'`
+  (3 z 8 auditovaných selhání releasů). Teď jasná hláška hned v preflightu:
+  suffix přidává workflow samo, caller ho nikdy nezadává.
+- `app-release.yml` deploy-prod: nový krok **Verify prod namespace exists**
+  hned za **Ensure namespace exists** — `kubectl get namespace "$NS"` s tvrdým
+  failem a instrukcí (bootstrap přes infra-liv11 `bootstrap-app.yml`), když
+  cílový namespace na clusteru není a nic v gitu ho nezakládá. Auditovaný
+  případ bvv-notification-hub 21.8.: release nikdy nebootstrapované appky
+  doběhl až do DB migrací a umřel na „namespaces not found". Záměrně AŽ PO
+  Ensure kroku: ten namespace legitimně zakládá z
+  `environments/prod/<slug>/namespace.yaml` (cattle-not-pets fáze 1), takže
+  guard střelí jen u appky, jejíž cílový ns neexistuje a git ho neprovisionuje.
+
 ## v2.5.8 — Secret/ConfigMap apply před migrate Jobem
 
 - `app-deploy-test.yml` + `app-release.yml`: kroky **Decrypt and apply SOPS
