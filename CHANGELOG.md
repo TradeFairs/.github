@@ -1,7 +1,24 @@
 # Changelog
 
-Reusable workflow changes, newest first. `v2` is the movable major tag (PLAN-105);
-after moving it, consumers need a **fresh run** (not a rerun) to pick it up.
+Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
+(`@v2.5.9`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
+
+## Nezatagováno — úklid (2026-08-31)
+
+- **`app-ci.yml` smazán.** Neměl jediného živého callera: org-wide `gh search code`
+  nenašel žádný `uses:` odkaz mimo historické `.codex/tasks/` a docs. Po konsolidaci
+  ADR-071 dělá CI monorepové `ci-affected.yml` v `bvv-platform` (detekce podle
+  změněných cest); poslední konzument — thin caller v šabloně `bvv-app-template` —
+  zmizel s bvv-platform PR #486, který smazal celý mrtvý šablonový
+  `.github/workflows/`. `app-ci.yml` navíc nikdy nedostalo input `appPath`
+  (na rozdíl od `app-deploy-test.yml`), takže by v monorepo layoutu nefungovalo.
+  Soubor zůstává ve všech historických tazích `v2.4.1`…`v2.5.9`, takže smazání
+  z `main` nemůže rozbít pinovaného konzumenta.
+- **Dependabot** (`.github/dependabot.yml`) sleduje `github-actions` ekosystém.
+  Doplňuje SHA piny actions napříč flotilou (bvv-platform PR #483 a sesterské
+  commity v `infra-liv11`/`k2-mcp`/`platform-workspace`) — pin bez automatického
+  bumpu zkostnatí. Reusables v tomhle repu Dependabot neaktualizuje: jsou to
+  `uses:` na workflow, ne na action.
 
 ## v2.5.9 — časné guardy releasu (bare semver, existence prod namespace)
 

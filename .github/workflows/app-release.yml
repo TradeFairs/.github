@@ -158,7 +158,7 @@ jobs:
       APP_PATH: ${{ inputs.appPath }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0  # full history to push commits + tag back to main
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -298,13 +298,13 @@ jobs:
             echo "driver=" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
         if: inputs.imageStrategy == 'docker'
         with:
           driver: ${{ steps.buildx_opts.outputs.driver }}
           driver-opts: ${{ steps.buildx_opts.outputs.driver == '' && steps.buildx_opts.outputs.opts || '' }}
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -328,7 +328,7 @@ jobs:
 
       - name: Build and push prod image
         if: inputs.imageStrategy == 'docker'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           # TD-821: the DOCKERFILE follows `appPath`; the BUILD CONTEXT does not
           # and must stay the repo root. This asymmetry is measured, not assumed:
@@ -615,7 +615,7 @@ jobs:
       K8S_DIR: ${{ inputs.appPath != '' && format('{0}/k8s', inputs.appPath) || 'k8s' }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           # TD-820: the tag created by the release job. Empty tagPrefix (every
           # existing caller) yields 'v' + releaseVersion, i.e. today's literal.
@@ -639,7 +639,7 @@ jobs:
         # workflow because every caller passes `secrets: inherit` — the
         # `workflow_call` block deliberately declares NO `secrets:` section, and
         # adding one would break every existing caller.
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: TradeFairs/infra-liv11
           path: .infra-liv11

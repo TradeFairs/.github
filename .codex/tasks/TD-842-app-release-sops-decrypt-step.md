@@ -1,4 +1,5 @@
-Status: APPROVED
+Status: DONE
+Done-Note: DONE (ověřeno 2026-08-31, úklidová dávka 5b): krok „Decrypt and apply SOPS secret (if migrated)" je v app-release.yml na ř. 776.
 Blocked-By:
 Gate-Granted:
 Complexity: complex

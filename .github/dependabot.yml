@@ -1,0 +1,24 @@
+version: 2
+
+# Sleduje actions POUŽITÉ UVNITŘ reusable workflows tohohle repa
+# (`actions/checkout` apod. v `app-deploy-test.yml`/`app-release.yml`), ne
+# `uses:` odkazy konzumentů na tyhle workflows — ty pinují semver tag a řídí
+# se `CHANGELOG.md`.
+#
+# Pozor: tohle repo nemá vlastní CI. Dependabot PR sem přistane bez
+# jakéhokoli automatického ověření, takže se musí projít ručně — bump actions
+# v release workflow se projeví až na produkčním releasu konzumenta.
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Jeden PR pro všechny actions místo jednoho na každou — o důvod víc,
+    # když se každý musí revidovat ručně.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"

@@ -1,4 +1,5 @@
-Status: TODO
+Status: DONE
+Done-Note: DONE 2026-08-31 (úklidová dávka 1): `.github/actionlint.yaml` s labely liv11/liv26 založen v bvv-platform, infra-liv11 i k2-mcp (platform-workspace ho měl už dřív). Ověřeno: s configem je actionlint na všech třech repech bez „unknown label" nálezů.
 Blocked-By: TD-836 (queued behind, not a real dependency — different file, independent
 change; sequenced per the one-TD-in-flight discipline for this small batch. Promote to
 READY_FOR_CODER once TD-836 is APPROVED.)

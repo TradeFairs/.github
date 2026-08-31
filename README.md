@@ -2,25 +2,27 @@
 
 Org-level reusable GitHub Actions workflows + defaults (PLAN-104 X3).
 
-Consumers call these via thin caller workflows pinned to the movable major tag `@v2`
-(PLAN-105 convention: after moving `v2`, a **fresh run** is required — a rerun keeps
-the old tag resolution). See `CHANGELOG.md` for versioned changes.
+Consumers call these via thin caller workflows pinned to an **explicit semver tag**
+(`@v2.5.9`). See `CHANGELOG.md` for versioned changes.
+
+> **Movable `@v2` už neexistuje** (smazán 2026-08-31; ověřeno: `gh api .../git/ref/tags/v2`
+> → 404). Zamrzl na commitu `9d18565` a měsíce se nehýbal, takže „movable major" byl
+> jen v dokumentaci, ne ve skutečnosti — konzumenti na něm dostávali měsíce starý
+> workflow bez varování. Explicitní semver pin navíc drží `bvv-platform`
+> `scripts/test-image-strategy-contract.mjs`, který vyžaduje tvar `@vX.Y.Z` a hlídá
+> minima; kvůli němu se tyhle piny záměrně **nepřevádějí na SHA**, na rozdíl od
+> third-party actions.
 
 ## Reusable workflows
 
-### `app-ci.yml` — lint, typecheck, unit tests + build-once-on-PR image (ADR-023 §K.1, ADR-034)
-
-| Input | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `slug` | string | yes | — | App slug (repo/image/deployment name), e.g. `dovolenky`. |
-| `basePath` | string | yes | — | App base path, e.g. `/dovolenky`. |
-| `runYalcGuard` | boolean | no | `false` | Fail if `package.json` carries dev-only `file:.yalc/` refs (PLAN-062). |
-| `runReleaseOrder` | boolean | no | `false` | Run the `@tradefairs/*` publish-order gate (`.github/scripts/release-order.sh`) before `ci` (PLAN-063). |
-| `postgres` | string | no | `none` | Provision a Postgres for the `ci` job: `none` \| `alpine` \| `pgvector`. |
-| `dbMigrate` | boolean | no | `false` | Run `pnpm db:migrate` against the provisioned Postgres (requires `postgres != none`). |
-| `dbTests` | boolean | no | `false` | Expose `DATABASE_URL` to `pnpm test` so DB-gated (`describeIfDb`) suites run (requires `postgres != none` + `dbMigrate`). |
-| `basePathGuard` | string | no | `standard` | Hardcoded-basePath-literal guard (ADR-024 §G): `standard` \| `off`. |
-| `buildVerify` | boolean | no | `false` | Build the PR Docker image **without pushing** to ghcr.io — verify-only compile check for apps without PR-image promotion (ADR-045 admin-prod-only profile, e.g. bvv-test-admin). |
+> **`app-ci.yml` byl smazán (2026-08-31).** Neměl jediného živého callera. Po
+> konsolidaci ADR-071 žije každá appka jako `apps/<slug>` v monorepu
+> bvv-platform a její CI obstarává tamní `ci-affected.yml` — ten appku detekuje
+> podle změněných cest a pustí build/lint/test/e2e. `app-ci.yml` navíc nikdy
+> nedostalo input `appPath` (na rozdíl od `app-deploy-test.yml`), takže by
+> v monorepo layoutu ani nefungovalo. Soubor zůstává ve všech historických
+> tazích `v2.4.1`…`v2.5.9`, takže smazání z `main` nemůže rozbít pinovaného
+> konzumenta.
 
 ### `app-deploy-test.yml` — deploy to `<slug>-test` namespace on push to main (ADR-023 §K.2)
 
