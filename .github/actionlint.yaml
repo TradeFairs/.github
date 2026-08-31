@@ -1,0 +1,16 @@
+self-hosted-runner:
+  # Vlastní labely self-hosted runnerů této flotily. Deklarace tady je
+  # actionlintem dokumentovaný mechanismus pro custom labely — nepotlačuje
+  # žádnou reálnou chybu, jen falešný nález „unknown label".
+  #
+  # `liv11` je runner s přístupem ke k3s clusteru — v tomhle repu ho používají
+  # `deploy` (app-deploy-test.yml) a `deploy-prod` (app-release.yml).
+  # `liv26` je CI/build runner; sem se dostane přes input `ciRunsOn`, který
+  # caller předává jako výraz, takže ho actionlint na `runs-on` nevidí jako
+  # literál — deklarován je pro případ, že by se sem někdy dostal napřímo.
+  labels:
+    - liv11
+    - liv26
+
+# Konfigurační proměnné repa/organizace. `null` = kontrola vypnuta.
+config-variables: null

@@ -10,7 +10,8 @@ summary: TradeFairs/.github has no self-triggered CI at all today (all 5 workflo
 
 # TD-838: add an actionlint pre-merge gate to TradeFairs/.github
 
-Status: TODO
+Status: DONE
+Done-Note: DONE (ověřeno 2026-08-31, úklidová dávka 5b): `actionlint-gate.yml` běží v platform-workspace a načítá `.github/actionlint.yaml` z kořene repa.
 Blocked-By: TD-837 (queued behind — TD-837 adds `.github/actionlint.yaml` declaring the
 `liv11` self-hosted runner label; without it, this gate's first run would immediately fail on
 the pre-existing `liv11` unknown-runner-label false positive on `app-release.yml`/
