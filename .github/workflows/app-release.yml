@@ -691,17 +691,45 @@ jobs:
         # Cattle-not-pets fáze 1 (platform-workspace docs/design/cattle-not-pets.md):
         # namespace zakládá deploy, ne SSH. Musí běžet PŘED aplikací Secretu a
         # ConfigMapy (obě jdou s `-n "$NS"` do namespace, který u čerstvé appky
-        # ještě neexistuje — render overlaye s Namespace resourcem se aplikuje
-        # až později). `kubectl apply` na Namespace je idempotentní; u
-        # existujících appek je to no-op. Chybějící soubor = zdokumentované
-        # výjimky (ns `platform` vlastní platform/namespaces/, k2-mcp vlastní
-        # repo) nebo nemigrovaná appka — skip s notice, ne fail.
+        # ještě neexistuje).
+        #
+        # Chybějící soubor NENÍ tichý skip (known-issues §9, opraveno
+        # 2026-08-31). Původní `else -> ::notice + pokračuj` nerozlišoval
+        # "appka namespace nevlastní" od "soubor chybí omylem", takže běh
+        # zezelenal, aniž se cokoli aplikovalo. Naměřeno na `jira-status-web`:
+        # jeho prod overlay má `namespace: jira-status` (sdílený s `jira-status`),
+        # `namespace.yaml` nemá, krok skipnul — a existující `Verify prod
+        # namespace exists` to nechytil, protože ověřuje EXISTENCI namespace,
+        # ne jeho VLASTNICTVÍ. Namespace existoval jen díky tomu, že release
+        # `jira-status` proběhl dřív; při opačném pořadí by chyběl i label
+        # `bvv.cz/trust-liv11-ca`.
+        #
+        # Zakládat druhý `namespace.yaml` opravou není — dva vlastníci téhož
+        # objektu jsou vada sama o sobě. Vlastnictví se proto deklaruje:
+        # komentářem `# bvv.cz/namespace-owner: <cesta|slug>` v
+        # `kustomization.yaml`. Není-li
+        # deklarováno a soubor chybí → fail. Jsou-li obojí → fail (dva vlastníci).
         run: |
           NS_FILE=".infra-liv11/environments/prod/${{ inputs.slug }}/namespace.yaml"
+          KUST=".infra-liv11/environments/prod/${{ inputs.slug }}/kustomization.yaml"
+          # Deklarovaný vlastník namespace. Prázdná hodnota = appka namespace
+          # vlastní sama a `namespace.yaml` MUSÍ existovat. Nosičem je
+          # `kustomization.yaml` (ne `params.yaml`) — ten má KAŽDÝ overlay,
+          # zatímco `params.yaml` jen ty, které staví na `k8s-base` (8 ze 14
+          # ho 2026-08-31 nemělo).
+          OWNER=$(sed -n 's/^#[[:space:]]*bvv\.cz\/namespace-owner:[[:space:]]*//p' "$KUST" | head -1)
+
           if [ -f "$NS_FILE" ]; then
+            if [ -n "$OWNER" ]; then
+              echo "::error::$KUST deklaruje namespace-owner=$OWNER, ale $NS_FILE existuje — dva vlastníci téhož objektu. Smaž jedno z nich."
+              exit 1
+            fi
             sudo kubectl apply -f "$NS_FILE"
+          elif [ -n "$OWNER" ]; then
+            echo "::notice::Namespace '$NS' vlastní '$OWNER' — tato appka ho nezakládá (deklarováno v $KUST)."
           else
-            echo "::notice::No namespace.yaml at $NS_FILE — skipping (namespace owned elsewhere or app not migrated)"
+            echo "::error::Chybí $NS_FILE a $KUST nedeklaruje vlastníka. Buď appka namespace vlastní (doplň namespace.yaml), nebo ho vlastní někdo jiný (doplň komentář '# bvv.cz/namespace-owner: <cesta|slug>' do kustomization.yaml). Odmítám tiše přeskočit."
+            exit 1
           fi
 
       - name: Verify prod namespace exists
