@@ -815,15 +815,38 @@ jobs:
           # happily succeeds on empty stdin — i.e. "secret not applied" would be
           # another silent green. See TD-842 R4.
           set -o pipefail
-          # Legacy app-repo cesta zrušena (cattle-not-pets fáze 5): žádná appka
-          # nemá apps/*/k8s/overlays/prod/secrets.enc.yaml (ověřeno 2026-08-30,
-          # bvv-platform origin/main) a PLAN-250 wave 1 je dokončená.
-          SECRET_FILE=".infra-liv11/environments/prod/${{ inputs.slug }}/secrets.enc.yaml"
-          if [ -f "$SECRET_FILE" ]; then
-            echo "Applying SOPS secret from $SECRET_FILE"
-            sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f -
+          SECRET_DIR=".infra-liv11/environments/prod/${{ inputs.slug }}"
+          # Aplikuje se KAŽDÝ `*.enc.yaml` v adresáři appky, ne jen
+          # `secrets.enc.yaml` (cattle-not-pets fáze 7, 2026-08-31). Důvod:
+          # appka může mít víc než jeden SOPS Secret a hardkódovaná jediná
+          # cesta by ty ostatní tiše ignorovala. Konkrétně `jira-status` má
+          # navíc `migrator-secret.enc.yaml` (credential pro `db-migrate`
+          # initContainer) a `jira-status-web` má `prod-readonly-secret.enc.yaml`
+          # (její JEDINÝ zdroj DATABASE_URL). Obojí byly do té doby
+          # cluster-side pets, které by po `delete ns` nešly obnovit z gitu —
+          # a hardkódovaná cesta byla poslední důvod, proč je tam držet.
+          #
+          # Řazení přes `sort` je záměrné: bez něj závisí pořadí applyů na
+          # pořadí globu, což je sice v praxi abecední, ale nespecifikované.
+          # Soubory cílí na různé Secrety, takže na pořadí nezáleží — ale
+          # deterministický log se čte líp než náhodný.
+          shopt -s nullglob
+          files=$(printf '%s\n' "$SECRET_DIR"/*.enc.yaml | sort)
+          if [ -z "$files" ]; then
+            echo "::notice::No *.enc.yaml in $SECRET_DIR — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
           else
-            echo "::notice::No secrets.enc.yaml at $SECRET_FILE — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
+            # Explicitní `|| exit 1`: `set -o pipefail` sám o sobě NESTAČÍ,
+            # protože exit status jedné iterace cyklus zahodí a krok skončí
+            # statusem POSLEDNÍ iterace. Selhání kteréhokoli dřívějšího
+            # souboru by tedy bylo přesně to "tiché zelené", před kterým
+            # varuje komentář výš (TD-841/842 R4). Naměřeno, ne odhadnuto.
+            for SECRET_FILE in $files; do
+              echo "Applying SOPS secret from $SECRET_FILE"
+              sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f - || {
+                echo "::error::apply $SECRET_FILE selhal"
+                exit 1
+              }
+            done
           fi
 
       - name: Apply plaintext config (if migrated)
