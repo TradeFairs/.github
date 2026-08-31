@@ -158,7 +158,7 @@ jobs:
       APP_PATH: ${{ inputs.appPath }}
 
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # full history to push commits + tag back to main
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -615,7 +615,7 @@ jobs:
       K8S_DIR: ${{ inputs.appPath != '' && format('{0}/k8s', inputs.appPath) || 'k8s' }}
 
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # TD-820: the tag created by the release job. Empty tagPrefix (every
           # existing caller) yields 'v' + releaseVersion, i.e. today's literal.
@@ -639,7 +639,7 @@ jobs:
         # workflow because every caller passes `secrets: inherit` — the
         # `workflow_call` block deliberately declares NO `secrets:` section, and
         # adding one would break every existing caller.
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TradeFairs/infra-liv11
           path: .infra-liv11
