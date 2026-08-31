@@ -745,6 +745,79 @@ jobs:
           echo "Pulled into k3s containerd:"
           sudo k3s ctr -n k8s.io images ls -q | grep "${{ inputs.slug }}" | head -5
 
+      - name: Decrypt and apply SOPS secret (if migrated)
+        # ADR-082 (amends ADR-013): SOPS material is cluster-specific config and
+        # lives in `infra-<cluster>`, at
+        # `environments/{prod,test}/<app>/secrets.enc.yaml`, with `.sops.yaml` per
+        # ENVIRONMENT (not per repo) so each environment has its own age key.
+        # TD-842 rework 2026-08-24: the originally shipped step read
+        # `$K8S_DIR/overlays/prod/secrets.enc.yaml`, a path relative to the
+        # CALLING app repo's checkout — infra-liv11 is never in that checkout
+        # (this job consumes it only as a remote kustomize base). With the secret
+        # in infra-liv11 that `-f` test is simply false, so the step took the
+        # skip branch and the PROD deploy went green having applied NO Secret.
+        # Hence the dedicated `.infra-liv11` checkout above and the infra-first
+        # resolution below.
+        #
+        # PLAN-250 wave 1 je dokončená, takže infra-liv11 je jediný zdroj:
+        # legacy app-repo cesta byla zrušena (cattle-not-pets fáze 5, 2026-08-30).
+        # Chybějící secrets.enc.yaml je teď čistý skip, ne tichý přechod na
+        # zastaralou kopii v app repu.
+        #
+        # Gated purely on file presence. Placed BEFORE "Run DB migrations" AND
+        # "Apply prod manifests" — both the migrate Job and the Deployment
+        # reference this Secret via envFrom. Drill fáze 7 (2026-08-30, gis-dms/
+        # test rebuild-from-git, cattle-not-pets) caught the equivalent bug in
+        # app-deploy-test.yml: a namespace with no PRIOR live Secret — the exact
+        # case a fresh bootstrap/rebuild produces — made the migrate Job fail
+        # immediately with `CreateContainerConfigError`. Prod always has a live
+        # Secret from a previous release today, so this hasn't surfaced here yet,
+        # but it's the identical latent ordering bug — fixed for consistency and
+        # to close the gap for any future first-time prod bootstrap. Pro appku
+        # bez secrets.enc.yaml v infra-liv11 je to čistý no-op — Secret si
+        # spravuje operátor ručně, jako dřív.
+        #
+        # No `SOPS_AGE_KEY_FILE` pinning and no `--age`/recipient flag: `sops -d`
+        # selects the private key by matching the file's own recipients against
+        # the keys available to the runner. Pinning a key here would silently
+        # defeat the per-environment key separation ADR-082 requires.
+        run: |
+          # `pipefail` so a failing `sops -d` (wrong/absent key) fails the STEP.
+          # Without it the pipeline's exit status is `kubectl apply`'s, which
+          # happily succeeds on empty stdin — i.e. "secret not applied" would be
+          # another silent green. See TD-842 R4.
+          set -o pipefail
+          # Legacy app-repo cesta zrušena (cattle-not-pets fáze 5): žádná appka
+          # nemá apps/*/k8s/overlays/prod/secrets.enc.yaml (ověřeno 2026-08-30,
+          # bvv-platform origin/main) a PLAN-250 wave 1 je dokončená.
+          SECRET_FILE=".infra-liv11/environments/prod/${{ inputs.slug }}/secrets.enc.yaml"
+          if [ -f "$SECRET_FILE" ]; then
+            echo "Applying SOPS secret from $SECRET_FILE"
+            sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f -
+          else
+            echo "::notice::No secrets.enc.yaml at $SECRET_FILE — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
+          fi
+
+      - name: Apply plaintext config (if migrated)
+        # Design doc `config-as-code-target-state` (platform-workspace
+        # docs/design/): non-secret env-bound values live NEXT TO the SOPS
+        # material as a plain ConfigMap manifest — plaintext in git, so
+        # `git log -p` answers "when did SYNC_CRON change". A key lives in
+        # exactly ONE of config.yaml / secrets.enc.yaml, never both. Gated
+        # purely on file presence; placed BEFORE "Run DB migrations" and "Apply
+        # prod manifests" for the same reason as the Secret above (both the
+        # migrate Job's and the Deployment's envFrom/configMapRef must resolve).
+        # The Deployment's configMapRef is `optional: true`, so un-migrated
+        # environments of a migrated app keep working.
+        run: |
+          INFRA_CONFIG=".infra-liv11/environments/prod/${{ inputs.slug }}/config.yaml"
+          if [ -f "$INFRA_CONFIG" ]; then
+            echo "Applying plaintext config from $INFRA_CONFIG"
+            sudo kubectl apply -n "$NS" -f "$INFRA_CONFIG"
+          else
+            echo "::notice::No config.yaml at $INFRA_CONFIG — skipping (no plaintext config for this app/env)"
+          fi
+
       - name: Run DB migrations (pre-deploy Job)
         run: |
           # TD-821: the skip below is only legitimate for a RESOLVED path. Before
@@ -794,71 +867,6 @@ jobs:
             exit 1
           fi
           set -e
-
-      - name: Decrypt and apply SOPS secret (if migrated)
-        # ADR-082 (amends ADR-013): SOPS material is cluster-specific config and
-        # lives in `infra-<cluster>`, at
-        # `environments/{prod,test}/<app>/secrets.enc.yaml`, with `.sops.yaml` per
-        # ENVIRONMENT (not per repo) so each environment has its own age key.
-        # TD-842 rework 2026-08-24: the originally shipped step read
-        # `$K8S_DIR/overlays/prod/secrets.enc.yaml`, a path relative to the
-        # CALLING app repo's checkout — infra-liv11 is never in that checkout
-        # (this job consumes it only as a remote kustomize base). With the secret
-        # in infra-liv11 that `-f` test is simply false, so the step took the
-        # skip branch and the PROD deploy went green having applied NO Secret.
-        # Hence the dedicated `.infra-liv11` checkout above and the infra-first
-        # resolution below.
-        #
-        # PLAN-250 wave 1 je dokončená, takže infra-liv11 je jediný zdroj:
-        # legacy app-repo cesta byla zrušena (cattle-not-pets fáze 5, 2026-08-30).
-        # Chybějící secrets.enc.yaml je teď čistý skip, ne tichý přechod na
-        # zastaralou kopii v app repu.
-        #
-        # Gated purely on file presence. Placed BEFORE "Apply prod manifests" —
-        # the Secret must exist before the Deployment referencing it is applied,
-        # otherwise a fresh-migration app's first rollout would fail on a missing
-        # Secret. Pro appku bez secrets.enc.yaml v infra-liv11 je to čistý
-        # no-op — Secret si spravuje operátor ručně, jako dřív.
-        #
-        # No `SOPS_AGE_KEY_FILE` pinning and no `--age`/recipient flag: `sops -d`
-        # selects the private key by matching the file's own recipients against
-        # the keys available to the runner. Pinning a key here would silently
-        # defeat the per-environment key separation ADR-082 requires.
-        run: |
-          # `pipefail` so a failing `sops -d` (wrong/absent key) fails the STEP.
-          # Without it the pipeline's exit status is `kubectl apply`'s, which
-          # happily succeeds on empty stdin — i.e. "secret not applied" would be
-          # another silent green. See TD-842 R4.
-          set -o pipefail
-          # Legacy app-repo cesta zrušena (cattle-not-pets fáze 5): žádná appka
-          # nemá apps/*/k8s/overlays/prod/secrets.enc.yaml (ověřeno 2026-08-30,
-          # bvv-platform origin/main) a PLAN-250 wave 1 je dokončená.
-          SECRET_FILE=".infra-liv11/environments/prod/${{ inputs.slug }}/secrets.enc.yaml"
-          if [ -f "$SECRET_FILE" ]; then
-            echo "Applying SOPS secret from $SECRET_FILE"
-            sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f -
-          else
-            echo "::notice::No secrets.enc.yaml at $SECRET_FILE — app not yet migrated to SOPS, skipping (manual secret application unchanged)"
-          fi
-
-      - name: Apply plaintext config (if migrated)
-        # Design doc `config-as-code-target-state` (platform-workspace
-        # docs/design/): non-secret env-bound values live NEXT TO the SOPS
-        # material as a plain ConfigMap manifest — plaintext in git, so
-        # `git log -p` answers "when did SYNC_CRON change". A key lives in
-        # exactly ONE of config.yaml / secrets.enc.yaml, never both. Gated
-        # purely on file presence; placed BEFORE "Apply prod manifests" for the
-        # same reason as the Secret above (the Deployment's envFrom must
-        # resolve). The Deployment's configMapRef is `optional: true`, so
-        # un-migrated environments of a migrated app keep working.
-        run: |
-          INFRA_CONFIG=".infra-liv11/environments/prod/${{ inputs.slug }}/config.yaml"
-          if [ -f "$INFRA_CONFIG" ]; then
-            echo "Applying plaintext config from $INFRA_CONFIG"
-            sudo kubectl apply -n "$NS" -f "$INFRA_CONFIG"
-          else
-            echo "::notice::No config.yaml at $INFRA_CONFIG — skipping (no plaintext config for this app/env)"
-          fi
 
       - name: Apply prod manifests
         env:
