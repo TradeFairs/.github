@@ -3,6 +3,19 @@
 Reusable workflow changes, newest first. `v2` is the movable major tag (PLAN-105);
 after moving it, consumers need a **fresh run** (not a rerun) to pick it up.
 
+## v2.5.8 — Secret/ConfigMap apply před migrate Jobem
+
+- `app-deploy-test.yml` + `app-release.yml`: kroky **Decrypt and apply SOPS
+  secret** a **Apply plaintext config** se teď spouští PŘED **Run DB
+  migrations (pre-deploy Job)**, ne až po něm. Migrate Job má stejný
+  `envFrom` na `<slug>-env-{test,prod}` Secret jako Deployment, ale jen
+  ordering vůči Deploymentu byl ošetřený. Každý dosavadní deploy měl Secret
+  živý z předchozího běhu, takže to nevadilo — objevil to až drill fáze 7
+  (cattle-not-pets, gis-dms/test rebuild-from-git) na čerstvém namespace bez
+  předchozího stavu: migrate Job spadl na `CreateContainerConfigError:
+  secret "gis-dms-env-test" not found`. Beze změny chování pro běžný případ
+  (Secret už existuje).
+
 ## v2.5.6 — deploy zakládá namespace (cattle-not-pets fáze 1)
 
 - `app-deploy-test.yml` + `app-release.yml`: nový krok **Ensure namespace
