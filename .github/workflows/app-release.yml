@@ -187,6 +187,17 @@ jobs:
           echo "Current package.json version: $CURRENT_VER"
           echo "Release version requested:    $RELEASE_VER"
           echo "Next dev version:             $NEXT_VER"
+          # 0. both inputs must be BARE semver. A '-SNAPSHOT' suffix typed into
+          #    the dispatch form used to fall through to the python compare below
+          #    and die with a cryptic "ValueError: invalid literal for int()"
+          #    (3 of 8 audited release failures). Fail early and explain.
+          for pair in "releaseVersion=$RELEASE_VER" "nextVersion=$NEXT_VER"; do
+            name="${pair%%=*}"; val="${pair#*=}"
+            if ! printf '%s' "$val" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::${name} '${val}' must be bare semver (e.g. 0.3.0) — '-SNAPSHOT' is added automatically by this workflow"
+              exit 1
+            fi
+          done
           # 1. package.json must be <releaseVersion>-SNAPSHOT
           EXPECTED_SNAPSHOT="${RELEASE_VER}-SNAPSHOT"
           if [ "$CURRENT_VER" != "$EXPECTED_SNAPSHOT" ]; then
@@ -692,6 +703,23 @@ jobs:
           else
             echo "::notice::No namespace.yaml at $NS_FILE — skipping (namespace owned elsewhere or app not migrated)"
           fi
+
+      - name: Verify prod namespace exists
+        # Fail EARLY and loudly when the resolved target namespace is absent
+        # from the cluster. Audited case (bvv-notification-hub, 21.8.): a
+        # release of an app never bootstrapped on prod ran all the way to the
+        # DB-migration Job before dying on "namespaces not found". This check
+        # deliberately runs AFTER "Ensure namespace exists" — that step
+        # legitimately CREATES the ns from environments/prod/<slug>/namespace.yaml
+        # (cattle-not-pets fáze 1), so this guard only fires when the ns is
+        # missing AND nothing in git provisions it (co-located or unmigrated
+        # app whose target namespace was never bootstrapped).
+        run: |
+          if ! sudo kubectl get namespace "$NS" >/dev/null 2>&1; then
+            echo "::error::Namespace '$NS' does not exist on the cluster — the app was never bootstrapped on prod. Provision it first via infra-liv11 bootstrap-app.yml (workflow_dispatch)."
+            exit 1
+          fi
+          echo "Prod namespace '$NS' exists on the cluster."
 
       - name: Free Docker disk space
         run: sudo docker system prune -f
