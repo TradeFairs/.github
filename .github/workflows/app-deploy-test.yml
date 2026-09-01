@@ -554,6 +554,58 @@ jobs:
           }
           cat kustomization.yaml
 
+      - name: Set image tag in refresh job ConfigMap
+        run: |
+          # Proc tenhle krok existuje (domereno proti clusteru 2026-09-01).
+          #
+          # `refresh-job-cm.yaml` nese SABLONU refresh Jobu, ktery spousti
+          # bvv-test-admin pri prod->test kopii dat. Sablona mela natvrdo
+          # `image: ghcr.io/tradefairs/<slug>:test` — plovouci tag.
+          #
+          # Tri veci dohromady delaly z toho tagu nefunkcni konstrukci:
+          #
+          #  1. Tag `:test` v containerd na liv11 NEEXISTUJE. Krok „Pull image
+          #     into k3s containerd" vyse importuje vyhradne `$IMAGE:$IMAGE_TAG`,
+          #     tedy verzovany tag. Merenim: `k3s ctr images ls -q | grep -c ':test'`
+          #     vracelo 0, zatimco osm refresh CM ho pozadovalo.
+          #  2. Kubelet by ho tedy musel tahnout z GHCR — jenze VSECHNY
+          #     `ghcr-pull-secret` ve flotile jsou mrtve. Pet namespacu nese pet
+          #     RUZNYCH tokenu a GHCR odmita kazdy z nich (403 Forbidden).
+          #  3. Zbytek flotily to nebolelo, protoze na kubelet pull nespoleha:
+          #     Deploymenty bezi verzovane tagy s `imagePullPolicy: IfNotPresent`
+          #     nad image importovanym do containerd. Refresh Job byl JEDINY
+          #     workload, ktery pull skutecne potreboval — proto tahle vada
+          #     zustala roky neodhalena a projevila se az pri auditu.
+          #
+          # Reseni: dat CM tentyz verzovany tag, jaky dostal Deployment. Image
+          # uz je po kroku vyse v containerd, takze `IfNotPresent` ho najde
+          # lokalne a pull secret neni potreba vubec.
+          #
+          # PROC SED A NE kustomize `images:` transformer: transformer prepisuje
+          # POLE `image` v pod specich, ale obsah ConfigMapy je pro nej
+          # NEPRUHLEDNY RETEZEC. Overeno empiricky — render prepsal image
+          # Deploymentu a tentyz image uvnitr `data:` nechal na `:test`.
+          #
+          # Krok je zamerne mekky (appka CM mit nemusi), ale jakmile soubor
+          # existuje, je tvrdy: neprepsany tag = tise rozbity refresh, coz je
+          # presne ten tichy rezim selhani, ktery tenhle krok odstranuje.
+          CM="$OVERLAY_DIR/refresh-job-cm.yaml"
+          if [ ! -f "$CM" ]; then
+            echo "No refresh-job-cm.yaml in $OVERLAY_DIR — skipping (app has no prod→test refresh)."
+            exit 0
+          fi
+          if ! grep -qE "^\s*image: $IMAGE:" "$CM"; then
+            echo "::error::$CM has no 'image: $IMAGE:<tag>' line — refresh job template shape changed. Refusing to deploy."
+            exit 1
+          fi
+          sed -i -E "s|^(\s*)image: $IMAGE:.*|\1image: $IMAGE:$IMAGE_TAG|" "$CM"
+          if ! grep -q "image: $IMAGE:$IMAGE_TAG" "$CM"; then
+            echo "::error::Failed to set refresh job image to $IMAGE:$IMAGE_TAG in $CM"
+            exit 1
+          fi
+          echo "Refresh job image set to:"
+          grep -nE "^\s*image: " "$CM"
+
       - name: Decrypt and apply SOPS secret (if migrated)
         # ADR-082 (amends ADR-013): SOPS material is cluster-specific config and
         # lives in `infra-<cluster>`, at
