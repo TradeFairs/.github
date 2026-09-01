@@ -1,7 +1,42 @@
 # Changelog
 
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
-(`@v2.5.9`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
+(`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
+
+## v2.5.12 — deploy nastavuje image tag i v refresh job ConfigMapě
+
+- **`app-deploy-test.yml`: nový krok „Set image tag in refresh job ConfigMap".**
+  `environments/test/<slug>/refresh-job-cm.yaml` nese šablonu Jobu, kterým
+  `bvv-test-admin` kopíruje prod data do testu. Image v ní byl natvrdo plovoucí
+  `ghcr.io/tradefairs/<slug>:test` — a ten **v containerd na liv11 neexistuje**
+  (`k3s ctr images ls -q | grep -c ':test'` → 0, zatímco osm CM ho žádalo).
+  Krok „Pull image into k3s containerd" importuje výhradně `$IMAGE:$IMAGE_TAG`.
+- **Kubelet by ho tedy musel stáhnout z GHCR, jenže všechny `ghcr-pull-secret`
+  ve flotile jsou mrtvé** — pět namespaců nese pět různých tokenů a GHCR odmítá
+  každý z nich (403). Doměřeno 2026-09-01 podem s explicitně připojeným Secretem
+  a `imagePullPolicy: Always`; běžící pody flotily nedokazují nic, protože ta na
+  kubelet pull nespoléhá (verzované tagy + `IfNotPresent` nad importovaným
+  image). Refresh Job byl jediný workload, který pull skutečně potřeboval.
+- **Řešení:** dát CM tentýž verzovaný tag jako Deploymentu. Image už v containerd
+  je, `IfNotPresent` ho najde lokálně a pull secret není potřeba vůbec.
+  Kustomize `images:` transformer to udělat NEMŮŽE — obsah ConfigMapy je pro něj
+  neprůhledný řetězec (ověřeno: render přepsal image Deploymentu a tentýž image
+  uvnitř `data:` nechal na `:test`).
+- Krok je měkký na neexistenci souboru (appka refresh mít nemusí), ale tvrdý na
+  změnu tvaru: chybějící `image: $IMAGE:<tag>` řádek shodí deploy, místo aby
+  tiše nasadil rozbitý refresh.
+
+## v2.5.11 — chybějící namespace.yaml není tichý skip
+
+- Doplněno zpětně 2026-09-01: tag existoval bez sekce v changelogu.
+  `app-deploy-test.yml` — krok zakládající namespace hledal `namespace.yaml`
+  podle slugu a appku sdílející namespace tiše přeskočil (#56).
+
+## v2.5.10 — aplikují se všechny `*.enc.yaml`, ne jen `secrets.enc.yaml`
+
+- Doplněno zpětně 2026-09-01: tag existoval bez sekce v changelogu.
+  Deploy aplikuje glob `"$SECRET_DIR"/*.enc.yaml`, takže vedle hlavního Secretu
+  projdou i vedlejší (např. `prod-readonly-secret.enc.yaml`) (#55).
 
 ## Nezatagováno — úklid (2026-08-31)
 
