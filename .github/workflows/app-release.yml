@@ -503,14 +503,38 @@ jobs:
         #   UNKNOWN   — GitHub is still computing mergeability
         # BLOCKED/BEHIND/UNKNOWN are polled (transient); DIRTY fails fast.
         #
-        # Plain merge commit (`--merge`, not `--squash`): squash-merging
-        # rewrites the commit SHA, which would force re-deriving the
-        # actual merged SHA before the tag (already pushed above, against
-        # the PRE-merge commit) can be trusted to match `main` — the exact
-        # ordering mistake documented from TD-820's human-gate merge. A
-        # plain merge/fast-forward keeps the bump commit's SHA identical
-        # pre- and post-merge, so the re-diff below is a confirmation, not
-        # a re-tagging operation.
+        # Squash merge (`--squash`, not `--merge`): `--merge` was chosen
+        # originally to keep the bump commit's SHA identical pre- and
+        # post-merge, so the tag pushed above (against the PRE-merge commit)
+        # would still be an ancestor of `main`. That reasoning was sound but
+        # its premise expired: `bvv-platform` now sets
+        # `allow_merge_commit=false` / `allow_squash_merge=true`, so
+        # `--merge` is refused outright with
+        # `GraphQL: Merge commits are not allowed on this repository.`
+        # It failed AFTER the tag and image were pushed and BEFORE
+        # deploy-prod, leaving prod on the old version with the release
+        # artifacts already published (jira-status-web 0.26.0, 2026-09-02).
+        #
+        # Squash is therefore the only method the repo allows. Its known
+        # cost, accepted deliberately: the release tag stays on the
+        # PRE-merge commit, which squashing leaves OUT of main's history —
+        # so `app/<slug>@<version>` is not an ancestor of `main`. Verified
+        # on the two releases already squash-merged by hand
+        # (`app/service-desk@0.26.1`, `app/jira-status-web@0.26.0`).
+        #
+        # Do NOT "fix" that by moving the tag onto the squashed commit.
+        # This PR carries TWO commits — `chore(release): v<version>` and
+        # `chore(release): bump to <next>-SNAPSHOT` — so the squashed
+        # commit's tree is the SNAPSHOT one, not the release one.
+        # `deploy-prod` checks out this tag (`ref: <tagPrefix><version>`),
+        # so repointing it would deploy a -SNAPSHOT tree to production. The
+        # tag must keep pointing at the commit whose tree actually IS the
+        # released version.
+        #
+        # What the orphaned tag costs is history-walking, not deployment:
+        # `git describe --match 'app/<slug>@*'` will not see it from `main`
+        # (the release skill's preflight uses it to diff the env schema
+        # since the last release — use `git tag --list` there instead).
         env:
           GH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -548,7 +572,7 @@ jobs:
             exit 1
           fi
 
-          if ! gh pr merge "$PR_NUMBER" --repo "${{ github.repository }}" --merge --delete-branch; then
+          if ! gh pr merge "$PR_NUMBER" --repo "${{ github.repository }}" --squash --delete-branch; then
             echo "::error::Failed to merge release-bump PR #$PR_NUMBER ($PR_URL) — refusing to continue silently."
             exit 1
           fi
