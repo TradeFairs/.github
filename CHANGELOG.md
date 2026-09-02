@@ -3,6 +3,26 @@
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
 (`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
 
+## v2.5.14 — setup-buildx v deploy-test jen pro `imageStrategy: docker`
+
+- **`app-deploy-test.yml`: `docker/setup-buildx-action` je gatovaný
+  `if: inputs.imageStrategy == 'docker'`** — stejná podmínka a tvar výrazu jako
+  v `app-release.yml`. Při `crane` (default flotily) běží v build jobu jen
+  promotion PR image (`docker buildx imagetools inspect/create`), které vystačí
+  s buildx CLI pluginem předinstalovaným na runneru (liv26: buildx v0.35.0).
+  Setup krok tam byl jen zbytečný download buildx binárky z GitHub releases —
+  a při jeho výpadku shazoval promotion, přestože k ní nebyl potřeba.
+- Krok `buildx_opts` už gatovaný byl; žádný krok crane cesty výstupy setupu
+  nečte (`steps.buildx_opts.*` konzumuje jen docker fallback build).
+- Callery se bumpují zvlášť, až tag existuje.
+
+## v2.5.13 — release-bump PR se merguje squashem
+
+- Doplněno zpětně 2026-09-02: tag existoval bez sekce v changelogu.
+  `app-release.yml` — `gh pr merge --merge` na `bvv-platform`
+  (`allow_merge_commit=false`) padal až po vzniku tagu a image, prod zůstal na
+  staré verzi; opraveno na `--squash` (#58).
+
 ## v2.5.12 — deploy nastavuje image tag i v refresh job ConfigMapě
 
 - **`app-deploy-test.yml`: nový krok „Set image tag in refresh job ConfigMap".**

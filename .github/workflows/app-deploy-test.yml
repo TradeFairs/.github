@@ -141,11 +141,6 @@ jobs:
         id: buildx_opts
         # ADR-083 krok 5c: driver-opts/build-args slouzi VYHRADNE docker
         # fallback buildu nize, takze se pri crane strategii nepocitaji.
-        # `docker/setup-buildx-action` nize ale gatovane ZAMERNE NENI:
-        # `Promote PR image` (happy path, obe strategie) vola
-        # `docker buildx imagetools create`, ktere potrebuje buildx CLI
-        # plugin. Gatovat setup by rozbilo promotion na runnerech, kde buildx
-        # neni predinstalovany — a to je hlavni cesta, ne fallback.
         if: inputs.imageStrategy == 'docker'
         shell: bash
         run: |
@@ -176,11 +171,15 @@ jobs:
             echo "driver=" >> "$GITHUB_OUTPUT"
           fi
 
-      # ADR-083 krok 5c: ZAMERNE negatovane — `Promote PR image` (happy path
-      # obou strategii) vola `docker buildx imagetools create`. Pri crane
-      # strategii je krok `buildx_opts` vyse preskoceny, takze obe hodnoty
-      # nize jsou prazdne = default chovani akce (auto driver, zadne opts).
+      # Gatovane stejne jako v app-release.yml: setup-buildx (stazeni buildx
+      # binarky z GitHubu + docker-container builder) potrebuje jen docker
+      # fallback build nize. Pri crane strategii (default flotily) bezi v tomto
+      # jobu uz jen `docker buildx imagetools inspect/create` (promotion PR
+      # image), a tomu staci buildx CLI plugin predinstalovany na runneru
+      # (liv26: buildx v0.35.0) — setup krok tam byl jen zbytecny sitovy
+      # download, ktery pri vypadku GitHub releases shazoval promotion.
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        if: inputs.imageStrategy == 'docker'
         with:
           driver: ${{ steps.buildx_opts.outputs.driver }}
           driver-opts: ${{ steps.buildx_opts.outputs.driver == '' && steps.buildx_opts.outputs.opts || '' }}
