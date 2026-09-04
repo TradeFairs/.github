@@ -109,6 +109,9 @@ jobs:
   # ── 1. Build & push image ────────────────────────────────────────────────────
   build:
     runs-on: ${{ fromJSON(inputs.ciRunsOn) }}
+    # ADR-029 §H: kazdy job ma timeout-minutes. Bez nej bezi na GHA default 360 min
+    # a zaseknuty build/deploy blokuje jediny liv11 runner (a s nim celou flotilu).
+    timeout-minutes: 20
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
     outputs:
@@ -119,6 +122,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          clean: false
+
+      - name: Clean tree (preserve node_modules)
+        # GHA audit 2026-09-04: checkout's default `clean: true` runs `git clean
+        # -ffdx`, which deletes the gitignored node_modules of the SHARED
+        # _work/<repo> tree on the self-hosted runner — so the next job of any
+        # workflow on that runner re-links all ~1400 packages (measured 29-35 s
+        # vs 13 s "Already up to date"). Same idiom as bvv-platform's
+        # ci-affected.yml (TD-624). Explicit clean below still removes every
+        # other untracked/ignored file (dist, .next, …).
+        run: git clean -ffdx -e node_modules
 
       - name: Validate imageStrategy
         run: |
@@ -343,6 +357,9 @@ jobs:
     # `self-hosted` label but has neither, so a bare `runs-on: self-hosted` could
     # land here and fail with `sudo: command not found`.
     runs-on: [self-hosted, liv11]
+    # ADR-029 §H: kazdy job ma timeout-minutes. Bez nej bezi na GHA default 360 min
+    # a zaseknuty deploy blokuje jediny liv11 runner (a s nim celou flotilu).
+    timeout-minutes: 20
     needs: build
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
@@ -739,16 +756,53 @@ jobs:
           # a stray (often stale prod) namespace line would conflict with the flag.
           sed "s|__JOB_NAME__|${JOB_NAME}|g; s|__IMAGE_TAG__|${IMAGE_TAG}|g; s|name: ${{ inputs.slug }}-env|name: ${{ inputs.slug }}-env-test|g; /^[[:space:]]*namespace:[[:space:]]/d" "$K8S_DIR/job-migrate.yaml" \
             | sudo kubectl apply -n "$NS" -f -
-          set +e
-          sudo kubectl -n "$NS" wait --for=condition=complete --timeout=300s "job/$JOB_NAME"
-          COMPLETE=$?
-          if [ $COMPLETE -ne 0 ]; then
-            echo "::error::Migration Job did not complete successfully"
+          # Poll the Job's own status instead of `kubectl wait
+          # --for=condition=complete`. Measured 2026-09-04 (service-desk
+          # migration 0030 on prod data): a migration that failed within
+          # seconds still burned the FULL 300s timeout six times in a row —
+          # `--for=condition=complete` has no failure predicate and can only
+          # time out on a failed Job. 6 × 5 min blocked the single liv11 runner
+          # and queued every other deploy behind it (test deploys waited 12-14 min).
+          #
+          # Every migrate Job in the fleet is `backoffLimit: 0` + `restartPolicy:
+          # Never` (verified 2026-09-04 across all 6 apps that have one), so a
+          # failing pod produces exactly ONE attempt and the Job reaches
+          # condition Failed (reason BackoffLimitExceeded) within seconds —
+          # `.status.failed` / condition Failed is a reliable fail-fast signal.
+          # The 300s ceiling is UNCHANGED for genuinely long migrations.
+          #
+          # Polling (2s tick, one cheap GET) rather than two backgrounded
+          # `kubectl wait` + `wait -n`: the latter leaves an orphan kubectl
+          # holding an apiserver watch under sudo, which is awkward to kill.
+          MIGRATE_START=$SECONDS
+          MIGRATE_RESULT=""
+          while [ $(( SECONDS - MIGRATE_START )) -lt 300 ]; do
+            COND=$(sudo kubectl -n "$NS" get "job/$JOB_NAME" \
+              -o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type}{" "}{end}' 2>/dev/null || true)
+            FAILED=$(sudo kubectl -n "$NS" get "job/$JOB_NAME" -o jsonpath='{.status.failed}' 2>/dev/null || true)
+            SUCCEEDED=$(sudo kubectl -n "$NS" get "job/$JOB_NAME" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)
+            case " $COND " in
+              *" Failed "*)   MIGRATE_RESULT="failed"; break ;;
+              *" Complete "*) MIGRATE_RESULT="succeeded"; break ;;
+            esac
+            if [ "${FAILED:-0}" -gt 0 ] 2>/dev/null; then MIGRATE_RESULT="failed"; break; fi
+            if [ "${SUCCEEDED:-0}" -gt 0 ] 2>/dev/null; then MIGRATE_RESULT="succeeded"; break; fi
+            sleep 2
+          done
+          MIGRATE_ELAPSED=$(( SECONDS - MIGRATE_START ))
+          if [ "$MIGRATE_RESULT" = "succeeded" ]; then
+            echo "Migration Job $JOB_NAME completed successfully after ${MIGRATE_ELAPSED}s"
+          else
+            if [ "$MIGRATE_RESULT" = "failed" ]; then
+              echo "::error::Migration Job $JOB_NAME FAILED after ${MIGRATE_ELAPSED}s (fail-fast: Job condition Failed / .status.failed>0 — not a timeout)"
+            else
+              echo "::error::Migration Job $JOB_NAME did not finish within the 300s budget (still running — genuine timeout, not a failure)"
+            fi
             sudo kubectl -n "$NS" describe "job/$JOB_NAME" || true
+            sudo kubectl -n "$NS" get pods -l job-name="$JOB_NAME" -o wide || true
             sudo kubectl -n "$NS" logs --tail=200 "job/$JOB_NAME" || true
             exit 1
           fi
-          set -e
 
       - name: Apply manifests
         env:
