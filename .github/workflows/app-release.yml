@@ -144,6 +144,12 @@ jobs:
     if: ${{ !inputs.deployOnly }}
     runs-on: ${{ fromJSON(inputs.ciRunsOn) }}
     timeout-minutes: 30
+    # GHA audit 2026-09-04: the ONLY data the merge job needs from this one.
+    # Everything else it does is GitHub-API-side, so it carries no checkout,
+    # no image, no tree -- just the PR number this job opened.
+    outputs:
+      pr-number: ${{ steps.bump_pr.outputs.pr-number }}
+      pr-url: ${{ steps.bump_pr.outputs.pr-url }}
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
       # TD-820: the release tag. With the default empty `tagPrefix` this is the
@@ -480,6 +486,35 @@ jobs:
           echo "pr-number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
           echo "Opened release-bump PR: $PR_URL"
 
+  # ── Merge the release-bump PR (GitHub-hosted) ────────────────────────────────
+  # GHA audit 2026-09-04: this used to be the tail of the `release` job, which
+  # meant a liv26 runner slot sat idle for the whole `mergeStateStatus` poll --
+  # i.e. for as long as bvv-platform's own ci-required takes on the bump PR
+  # (11-19 min per release; 76 runner-minutes on 4. 9. across six releases).
+  # Worse, that poll competed with the very CI it was waiting for: three
+  # concurrent releases held three of the four liv26 slots, so their bump PRs'
+  # ci-required queued behind them (10:41 that day: 4-11 min queue).
+  #
+  # The polling needs nothing from the runner -- no checkout, no image, no
+  # tree, only the PR number and a token -- so it runs on ubuntu-latest.
+  # Billed cost: ~15 hosted minutes per release against ADR-029's 2000/month
+  # budget, well inside the <1500 target at the fleet's release cadence.
+  # Everything that DOES need the checkout (tag creation + push, image build,
+  # bump PR creation) stays in `release`, and every invariant documented there
+  # still holds: the tag points at the pre-merge commit, the image is pushed
+  # before the tag, squash is the only merge method.
+  merge_bump_pr:
+    if: ${{ !inputs.deployOnly }}
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      # Same derivation as in `release` (TD-820): `gh release create` below
+      # needs the tag name, and a separate job does not inherit job-level env.
+      RELEASE_TAG: ${{ inputs.tagPrefix != '' && inputs.tagPrefix || 'v' }}${{ inputs.releaseVersion }}
+    steps:
       - name: Wait for the release-bump PR to become mergeable, then merge it
         # Poll GitHub's OWN mergeability verdict (`mergeStateStatus`) rather
         # than any named check. Fail the job LOUDLY (non-zero exit) on any
@@ -549,8 +584,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          PR_NUMBER="${{ steps.bump_pr.outputs.pr-number }}"
-          PR_URL="${{ steps.bump_pr.outputs.pr-url }}"
+          PR_NUMBER="${{ needs.release.outputs.pr-number }}"
+          PR_URL="${{ needs.release.outputs.pr-url }}"
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::release job reported no bump PR number (outputs.pr-number empty) — refusing to guess which PR to merge. The tag and image for this release already exist."
+            exit 1
+          fi
 
           echo "Waiting for PR #$PR_NUMBER to become mergeable..."
           # 60 × 20s = 20 minutes. Sized against the required check it is
@@ -604,7 +643,9 @@ jobs:
           fi
           echo "Merged release-bump PR #$PR_NUMBER at $MERGE_COMMIT"
 
-          MAIN_SHA=$(git ls-remote origin refs/heads/main | cut -f1)
+          # No checkout in this job: read main's tip through the API instead of
+          # `git ls-remote`.
+          MAIN_SHA=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha 2>/dev/null || true)
           echo "origin/main is now at $MAIN_SHA"
           if [ "$MAIN_SHA" != "$MERGE_COMMIT" ]; then
             echo "::warning::origin/main ($MAIN_SHA) has moved past the merge commit ($MERGE_COMMIT) — another push landed concurrently. The release bump itself is still on main (verified via the PR's merge commit), this is only informational."
@@ -613,6 +654,7 @@ jobs:
       - name: Create GitHub Release
         run: |
           gh release create "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
             --generate-notes \
             --title "$RELEASE_TAG"
         env:
@@ -626,17 +668,21 @@ jobs:
     # land there and fail (`sudo: command not found`) or misdeploy.
     runs-on: [self-hosted, liv11]
     timeout-minutes: 20
-    needs: release
+    needs: [release, merge_bump_pr]
     # `needs` alone would skip this job whenever `release` is skipped, so
     # deployOnly needs `always()` to reach it. The condition is written to
     # keep the ONLY previously-possible path intact: a FAILED or CANCELLED
     # release must still block the deploy. Spelled out per mode:
     #   deployOnly=false → requires release.result == 'success' (today's `needs`)
     #   deployOnly=true  → release is 'skipped'; deploy runs off the existing tag
+    # GHA audit 2026-09-04: `merge_bump_pr` (the merge half of the former
+    # release job, now on ubuntu-latest) is required symmetrically -- prod must
+    # never roll out a version whose bump PR did not land on main, exactly as
+    # before the split when the merge step was inside `release`.
     if: >-
       ${{ always() && !cancelled() &&
-          (inputs.deployOnly && needs.release.result == 'skipped'
-           || !inputs.deployOnly && needs.release.result == 'success') }}
+          (inputs.deployOnly && needs.release.result == 'skipped' && needs.merge_bump_pr.result == 'skipped'
+           || !inputs.deployOnly && needs.release.result == 'success' && needs.merge_bump_pr.result == 'success') }}
     env:
       IMAGE: ghcr.io/tradefairs/${{ inputs.slug }}
       IMAGE_TAG: ${{ inputs.releaseVersion }}
