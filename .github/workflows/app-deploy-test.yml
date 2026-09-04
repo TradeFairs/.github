@@ -835,12 +835,30 @@ jobs:
         run: |
           set +e
           APP=${{ inputs.slug }}
+          # GHA audit 2026-09-04: every retry so far has printed "No stuck
+          # Terminating pods found" and then either succeeded or timed out
+          # again (service-catalog 0.18.0: 6.3 min in this step, both retries
+          # blind). The force-delete branch below therefore never had evidence
+          # for the state it assumes. Dump what the cluster actually shows
+          # BEFORE touching anything, so the next failure tells us whether it
+          # is a slow image pull, a failing probe, a Pending pod (resources /
+          # PVC), or a genuinely stuck termination -- and the retry structure
+          # can be redesigned from data instead of guessed at. Read-only,
+          # `|| true` everywhere: diagnostics must never change the verdict.
+          dump_rollout_state() {
+            echo "--- rollout diagnostics ($1) ---"
+            sudo kubectl get pods -n "$NS" -l app=$APP -o wide 2>/dev/null || true
+            sudo kubectl get rs -n "$NS" -l app=$APP 2>/dev/null || true
+            sudo kubectl get events -n "$NS" --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true
+            echo "--- end diagnostics ---"
+          }
           for attempt in 1 2 3; do
             if sudo kubectl rollout status deployment/$APP -n "$NS" --timeout=120s; then
               echo "Rollout succeeded on attempt $attempt"
               exit 0
             fi
             if [ $attempt -lt 3 ]; then
+              dump_rollout_state "after failed attempt $attempt"
               echo "::warning::Rollout attempt $attempt failed, force-deleting stuck Terminating pods..."
               STUCK=$(sudo kubectl get pods -n "$NS" -l app=$APP --no-headers 2>/dev/null | awk '$3 == "Terminating" {print $1}')
               if [ -n "$STUCK" ]; then
@@ -852,6 +870,7 @@ jobs:
               sleep 5
             fi
           done
+          dump_rollout_state "after final attempt"
           echo "::error::Rollout failed after 3 attempts"
           exit 1
 
