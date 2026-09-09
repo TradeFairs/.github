@@ -48,6 +48,16 @@ on:
           never fails a release (see the step comment).
         type: boolean
         default: false
+      deployTestWorkflow:
+        description: >-
+          File name of the workflow that deploys this repo to the test
+          environment, used by the ADVISORY preflight below. Default
+          `deploy-test.yml` is the pre-ADR-071 per-app-repo name; the
+          bvv-platform monorepo deploys via `deploy-affected.yml` and must pass
+          it explicitly. A name that does not exist makes the preflight report
+          "inconclusive" forever — it never fails the release.
+        type: string
+        default: deploy-test.yml
       appPath:
         description: >-
           Monorepo-relative path (e.g. `apps/<slug>`) to the app's own
@@ -135,12 +145,17 @@ permissions:
   contents: write
   packages: write
   # `actions: read` is required by the "Test-env preflight" step below, which
-  # calls `GET /actions/workflows/deploy-test.yml/runs`. A reusable workflow's
-  # own `permissions:` block is the CEILING — a caller can only narrow it, never
-  # add a scope — so this cannot be fixed in the calling repo's workflow.
-  # Without it the org-wide read-only GITHUB_TOKEN default (TradeFairs, set
-  # 2026-08-31) makes that call return 403 and the check silently degrades to
-  # "always inconclusive". Observed on bvv-platform run 34359207450.
+  # calls `GET /actions/workflows/<deployTestWorkflow>/runs`. Without it the
+  # org-wide read-only GITHUB_TOKEN default (TradeFairs, set 2026-08-31) makes
+  # that call return 403 and the check silently degrades to "always
+  # inconclusive" (bvv-platform run 34359207450).
+  #
+  # DECLARING IT HERE IS NOT ENOUGH: a caller job must GRANT the scope too. A
+  # reusable workflow can only narrow what the caller gives it, so a scope the
+  # caller omits makes GitHub reject the run BEFORE the first job starts
+  # (startup_failure — bvv-platform run 34370753959, where v2.5.18 added this
+  # line and the 13 callers still had only contents+packages). Every caller of
+  # this workflow must carry `actions: read` in its own `permissions:` block.
   actions: read
 
 concurrency:
@@ -261,13 +276,13 @@ jobs:
           # emitted the whole `{"message":"Resource not accessible by
           # integration"...}` blob into the warning as if it were a SHA. Gate on
           # the exit status first, and keep LATEST only when it looks like a SHA.
-          LATEST=$(gh api "repos/${{ github.repository }}/actions/workflows/deploy-test.yml/runs?branch=main&status=success&per_page=1" \
+          LATEST=$(gh api "repos/${{ github.repository }}/actions/workflows/${{ inputs.deployTestWorkflow }}/runs?branch=main&status=success&per_page=1" \
             --jq '.workflow_runs[0].head_sha // ""' 2>/dev/null)
           if [ $? -ne 0 ] || ! printf '%s' "$LATEST" | grep -qE '^[0-9a-f]{40}$'; then
             LATEST=""
           fi
           if [ -z "$LATEST" ]; then
-            echo "::warning::Test-env preflight: could not resolve the last successful deploy-test run (no deploy-test.yml workflow, no successful run yet, or API error) — advisory check inconclusive."
+            echo "::warning::Test-env preflight: could not resolve the last successful run of ${{ inputs.deployTestWorkflow }} on main (workflow not found under that name, no successful run yet, or API error) — advisory check inconclusive."
             exit 0
           fi
           if [ "$LATEST" = "${{ github.sha }}" ]; then
