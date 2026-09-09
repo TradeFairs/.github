@@ -3,6 +3,26 @@
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
 (`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
 
+## v2.5.19 — preflight hledá workflow podle jména z inputu
+
+- **Nový input `deployTestWorkflow`** (string, default `deploy-test.yml`).
+  Krok „Test-env preflight" měl název workflow zadrátovaný jako
+  `deploy-test.yml` — jméno z doby před ADR-071, kdy měla každá appka vlastní
+  repo. V monorepu `bvv-platform` se na test nasazuje přes `deploy-affected.yml`
+  a soubor `deploy-test.yml` **neexistuje v žádném repu org** (ověřeno
+  code searchem), takže volání vracelo 404 a kontrola hlásila „inconclusive"
+  i po opravě 403 z v2.5.18. Default zachovává chování pro případné konzumenty
+  se starým jménem; `bvv-platform` si předá své.
+- Varování nově uvádí, které jméno se hledalo — dřív tvrdilo „no deploy-test.yml
+  workflow" bez ohledu na skutečně použitou hodnotu.
+- **Opraven komentář u `permissions:`**, který od v2.5.18 tvrdil, že scope nelze
+  doplnit u callera. Je to naopak: caller musí scope **udělit**, reusable ho pak
+  může jen zúžit. Scope deklarovaný jen tady a chybějící u callera shodí běh
+  jako `startup_failure` ještě před prvním jobem — přesně to se stalo na
+  bvv-platform běhu 34370753959.
+- Chování zůstává **advisory** (TD-224): krok nikdy nefailuje release.
+- Callery se bumpují zvlášť, až tag existuje.
+
 ## v2.5.18 — Test-env preflight skutečně kontroluje (actions: read + SHA guard)
 
 - **`app-release.yml`: doplněn scope `actions: read`** do top-level
