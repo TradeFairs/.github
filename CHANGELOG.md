@@ -3,6 +3,25 @@
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
 (`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
 
+## v2.5.18 — Test-env preflight skutečně kontroluje (actions: read + SHA guard)
+
+- **`app-release.yml`: doplněn scope `actions: read`** do top-level
+  `permissions:`. Krok „Test-env preflight" volá
+  `GET /actions/workflows/deploy-test.yml/runs`, který ten scope vyžaduje. Od
+  org-wide read-only `GITHUB_TOKEN` (TradeFairs, 2026-08-31) vracelo volání 403,
+  takže advisory kontrola „test ns běží current main HEAD" **vždy** skončila jako
+  inconclusive a nikdy nic nezachytila. Opravit to u callera nejde — vlastní
+  `permissions:` blok reusable workflow je strop, volající ho může jen zúžit.
+- **Chybový JSON se už nepřijme jako SHA.** `gh api --jq` při neúspěšném
+  požadavku tiskne surové tělo odpovědi; `.workflow_runs[0]` na chybovém objektu
+  nematchne, takže filtr nemá co odstranit a JSON projde na stdout — větev
+  `[ -z "$LATEST" ]` se pak neuplatnila a do warningu se vypsal celý blob
+  `{"message":"Resource not accessible by integration"...}` místo SHA (viděno na
+  bvv-platform run 34359207450). Nově se gatuje na exit status a hodnota se
+  přijme jen jako 40 hex znaků.
+- Chování zůstává **advisory** (TD-224): krok stále nikdy nefailuje release.
+- Callery se bumpují zvlášť, až tag existuje.
+
 ## v2.5.14 — setup-buildx v deploy-test jen pro `imageStrategy: docker`
 
 - **`app-deploy-test.yml`: `docker/setup-buildx-action` je gatovaný
