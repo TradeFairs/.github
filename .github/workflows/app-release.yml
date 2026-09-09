@@ -134,6 +134,14 @@ on:
 permissions:
   contents: write
   packages: write
+  # `actions: read` is required by the "Test-env preflight" step below, which
+  # calls `GET /actions/workflows/deploy-test.yml/runs`. A reusable workflow's
+  # own `permissions:` block is the CEILING — a caller can only narrow it, never
+  # add a scope — so this cannot be fixed in the calling repo's workflow.
+  # Without it the org-wide read-only GITHUB_TOKEN default (TradeFairs, set
+  # 2026-08-31) makes that call return 403 and the check silently degrades to
+  # "always inconclusive". Observed on bvv-platform run 34359207450.
+  actions: read
 
 concurrency:
   group: release-${{ inputs.slug }}
@@ -247,8 +255,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
+          # `gh api --jq` prints the raw error body when the request fails
+          # (403/404): `.workflow_runs[0]` simply does not match, so the filter
+          # yields nothing to strip and the JSON reaches stdout. Run 34359207450
+          # emitted the whole `{"message":"Resource not accessible by
+          # integration"...}` blob into the warning as if it were a SHA. Gate on
+          # the exit status first, and keep LATEST only when it looks like a SHA.
           LATEST=$(gh api "repos/${{ github.repository }}/actions/workflows/deploy-test.yml/runs?branch=main&status=success&per_page=1" \
             --jq '.workflow_runs[0].head_sha // ""' 2>/dev/null)
+          if [ $? -ne 0 ] || ! printf '%s' "$LATEST" | grep -qE '^[0-9a-f]{40}$'; then
+            LATEST=""
+          fi
           if [ -z "$LATEST" ]; then
             echo "::warning::Test-env preflight: could not resolve the last successful deploy-test run (no deploy-test.yml workflow, no successful run yet, or API error) — advisory check inconclusive."
             exit 0
