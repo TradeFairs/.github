@@ -793,14 +793,28 @@ jobs:
           if [ "$MIGRATE_RESULT" = "succeeded" ]; then
             echo "Migration Job $JOB_NAME completed successfully after ${MIGRATE_ELAPSED}s"
           else
+            MIGRATE_LOG=$(sudo kubectl -n "$NS" logs --tail=200 "job/$JOB_NAME" 2>/dev/null || true)
+            # Runner appky označil migraci jako dlouhou (`*.long.sql`) a NESPUSTIL
+            # ji — dlouhé migrace se z deploy cesty nepouštějí, protože Job nemá
+            # deadline (`backoffLimit: 0`) a červený krok pro běžící migraci je
+            # k nerozeznání od skutečného selhání. Tohle NENÍ timeout ani vada
+            # migrace. Držet shodné s `app-release.yml`, jinak se test a prod
+            # rozejdou. Značku vypisuje runner appky.
+            if printf '%s' "$MIGRATE_LOG" | grep -q 'MISSING LONG MIGRATION'; then
+              PENDING=$(printf '%s' "$MIGRATE_LOG" | grep 'MISSING LONG MIGRATION' \
+                | sed 's/.*MISSING LONG MIGRATION //' | tr '\n' ' ')
+              echo "::error::Long migration(s) not applied: ${PENDING}— deliberately NOT run from the deploy path. Run them supervised against the test DB (skill \`db-patch\`), then re-run this deploy. This is NOT a timeout and NOT a migration failure."
+              printf '%s\n' "$MIGRATE_LOG"
+              exit 1
+            fi
             if [ "$MIGRATE_RESULT" = "failed" ]; then
               echo "::error::Migration Job $JOB_NAME FAILED after ${MIGRATE_ELAPSED}s (fail-fast: Job condition Failed / .status.failed>0 — not a timeout)"
             else
-              echo "::error::Migration Job $JOB_NAME did not finish within the 300s budget (still running — genuine timeout, not a failure)"
+              echo "::error::Migration Job $JOB_NAME did not finish within the 300s budget (still running — genuine timeout, not a failure). If this migration is expected to be slow, mark it \`*.long.sql\` so it is run supervised instead of from the deploy path."
             fi
             sudo kubectl -n "$NS" describe "job/$JOB_NAME" || true
             sudo kubectl -n "$NS" get pods -l job-name="$JOB_NAME" -o wide || true
-            sudo kubectl -n "$NS" logs --tail=200 "job/$JOB_NAME" || true
+            printf '%s\n' "$MIGRATE_LOG"
             exit 1
           fi
 
