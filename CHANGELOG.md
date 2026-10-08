@@ -3,7 +3,7 @@
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
 (`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
 
-## v2.5.21 (nevydáno) — Secrety se nikdy nevypisují do logu
+## v2.5.21 — Secrety se nikdy nevypisují do logu
 
 - **`app-release.yml` a `app-deploy-test.yml`: krok „Apply SOPS secret"** už
   nepipuje `sops -d | kubectl apply` přímo do logu. Incident 2026-10-08: neplatná
