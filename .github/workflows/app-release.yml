@@ -956,6 +956,42 @@ jobs:
           # happily succeeds on empty stdin — i.e. "secret not applied" would be
           # another silent green. See TD-842 R4.
           set -o pipefail
+          # BEGIN apply-sops-secret (test: scripts/test-apply-sops-secret.mjs)
+          # Výstup `kubectl apply` u Secretů se NIKDY nesmí dostat do logu syrový:
+          # při neplatné hodnotě v `data:` kubectl v chybě vypíše celý patch včetně
+          # `last-applied-configuration`, tj. hodnoty VŠECH klíčů Secretu (incident
+          # 2026-10-08). Proto: stdout jen přes whitelist `secret/<name> <verb>`,
+          # stderr do souboru a ven jen kategorie chyby (whitelist vzorů, žádné
+          # "odstraň hodnoty" regexy). Chybu `sops -d` hlásíme bez detailu.
+          apply_sops_secret() {
+            local f=$1 ns=$2 out err sopserr rc
+            out=$(mktemp) err=$(mktemp) sopserr=$(mktemp)
+            rc=(0 0)
+            # shellcheck disable=SC2024 # redirecty patří běžícímu shellu, ne sudo — záměr
+            sops -d "$f" 2>"$sopserr" | sudo kubectl apply -n "$ns" -f - >"$out" 2>"$err" \
+              || rc=("${PIPESTATUS[@]}")
+            grep -E '^secret/[a-z0-9.-]+ (configured|unchanged|created)$' "$out" || true
+            local hidden
+            hidden=$(grep -vcE '^secret/[a-z0-9.-]+ (configured|unchanged|created)$' "$out" || true)
+            [ "${hidden:-0}" -eq 0 ] || echo "::notice::kubectl stdout: ${hidden} nestandardních řádků potlačeno (mohou obsahovat hodnoty)"
+            local status=0
+            if [ "${rc[0]}" -ne 0 ]; then
+              echo "::error::sops -d $f selhal (exit ${rc[0]}; detail záměrně skryt)"
+              status=1
+            elif [ "${rc[1]}" -ne 0 ]; then
+              if grep -qi 'illegal base64' "$err"; then
+                echo "::error::kubectl apply $f selhal (exit ${rc[1]}): hodnota v data: není base64"
+              elif grep -qi 'already defined' "$err"; then
+                echo "::error::kubectl apply $f selhal (exit ${rc[1]}): duplicitní klíč"
+              else
+                echo "::error::kubectl apply $f selhal (exit ${rc[1]}; detail záměrně skryt — obsahuje hodnoty)"
+              fi
+              status=1
+            fi
+            rm -f "$out" "$err" "$sopserr"
+            return $status
+          }
+          # END apply-sops-secret
           SECRET_DIR=".infra-liv11/environments/prod/${{ inputs.slug }}"
           # Aplikuje se KAŽDÝ `*.enc.yaml` v adresáři appky, ne jen
           # `secrets.enc.yaml` (cattle-not-pets fáze 7, 2026-08-31). Důvod:
@@ -983,10 +1019,7 @@ jobs:
             # varuje komentář výš (TD-841/842 R4). Naměřeno, ne odhadnuto.
             for SECRET_FILE in $files; do
               echo "Applying SOPS secret from $SECRET_FILE"
-              sops -d "$SECRET_FILE" | sudo kubectl apply -n "$NS" -f - || {
-                echo "::error::apply $SECRET_FILE selhal"
-                exit 1
-              }
+              apply_sops_secret "$SECRET_FILE" "$NS" || exit 1
             done
           fi
 

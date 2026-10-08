@@ -3,6 +3,22 @@
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
 (`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
 
+## v2.5.21 (nevydáno) — Secrety se nikdy nevypisují do logu
+
+- **`app-release.yml` a `app-deploy-test.yml`: krok „Apply SOPS secret"** už
+  nepipuje `sops -d | kubectl apply` přímo do logu. Incident 2026-10-08: neplatná
+  base64 hodnota v `data:` vyvolala chybu `kubectl apply`, která vypíše celý patch
+  včetně `last-applied-configuration`, tedy hodnoty všech klíčů produkčního Secretu.
+  Nová inline funkce `apply_sops_secret` pouští ven jen stdout odpovídající
+  `^secret/<name> (configured|unchanged|created)$` a stderr nahrazuje kategorií
+  chyby (není base64 / duplicitní klíč / obecná hláška bez detailu). `pipefail`,
+  `|| exit 1` per soubor a pád kroku při selhání `sops -d` zůstávají.
+- Funkce je inline (reusable workflow nemůže volat skript z jiného repa bez
+  checkoutu) a v obou workflow musí být byte-identická — hlídá
+  `scripts/test-apply-sops-secret.mjs` (`npm run test:apply-sops-secret`).
+- Callery (`bvv-platform` `release-app.yml`, `deploy-affected.yml`) se bumpují
+  zvlášť, až tag existuje.
+
 ## v2.5.19 — preflight hledá workflow podle jména z inputu
 
 - **Nový input `deployTestWorkflow`** (string, default `deploy-test.yml`).
