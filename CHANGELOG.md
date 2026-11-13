@@ -3,6 +3,19 @@
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
 (`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
 
+## v2.5.22 — „Resolve PR image" vypíše chybu `gh api`
+
+- **`app-deploy-test.yml`, krok „Resolve PR image"**: volání `gh api …/commits/<sha>/pulls`
+  už nezahazuje stderr (`2>/dev/null`). Incident 2026-11-13: na self-hosted runnerech
+  st2104 chybělo `gh` (exit 127) a tři deploye bvv-platform spadly s hláškou
+  „permissions/transient" bez viditelné příčiny. Stderr se zachytí do dočasného souboru
+  a v chybové větvi vypíše ve skupině `gh api stderr (exit N)`; hláška uvádí exit kód.
+  Větvení (`require_pr_image=true` → error, jinak warning + rebuild) a úspěšná cesta
+  beze změny; hlídá `npm run test:promotion-contract` (Case A).
+- `app-release.yml` má stejný vzor na třech místech (`gh … 2>/dev/null || true`) —
+  neměněno; self-hosted runner pro release musí mít `gh` nainstalované.
+- Callery (`bvv-platform` `deploy-affected.yml`) se bumpují zvlášť, až tag existuje.
+
 ## v2.5.21 — Secrety se nikdy nevypisují do logu
 
 - **`app-release.yml` a `app-deploy-test.yml`: krok „Apply SOPS secret"** už
