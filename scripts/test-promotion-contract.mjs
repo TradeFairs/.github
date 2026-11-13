@@ -77,10 +77,16 @@ check(
 
 // Case A: gh api failure
 const caseAMatch = resolveStep.match(
-  /if ! PR_SHA=\$\(gh api[\s\S]*?fi\n(?=\s*if \[ -z "\$PR_SHA" \])/,
+  /PR_SHA=\$\(gh api[^\n]*2>"\$GH_ERR"\) \|\| GH_RC=\$\?\s*\n\s*if \[ "\$GH_RC" -ne 0 \]; then[\s\S]*?fi\n(?=\s*rm -f "\$GH_ERR"\s*\n\s*if \[ -z "\$PR_SHA" \])/,
 );
 check('Case A (gh api failure) block found', caseAMatch !== null);
 const caseA = caseAMatch ? caseAMatch[0] : '';
+check(
+  'Case A: gh api stderr is printed to the log (not discarded)',
+  /echo "::group::gh api stderr \(exit \$GH_RC\)"\s*\n\s*cat "\$GH_ERR"\s*\n\s*echo "::endgroup::"/.test(
+    caseA,
+  ) && !/gh api[^\n]*2>\/dev\/null/.test(resolveStep),
+);
 check(
   'Case A: require_pr_image=true hard-fails with ::error:: + exit 1',
   /if \[ "\$REQUIRE_PR_IMAGE" = "true" \];\s*then\s*\n\s*echo "::error::.*gh api.*"\s*\n\s*exit 1\s*\n\s*fi/.test(
@@ -89,7 +95,7 @@ check(
 );
 check(
   'Case A: fail-open branch unchanged (::warning:: + image_found=false + exit 0)',
-  /echo "::warning::gh api commits\/<sha>\/pulls failed \(permissions\/transient\) — falling back to rebuild"\s*\n\s*echo "image_found=false" >> "\$GITHUB_OUTPUT"\s*\n\s*exit 0/.test(
+  /echo "::warning::gh api commits\/<sha>\/pulls failed \(exit \$GH_RC; [^"]*\) — falling back to rebuild"\s*\n\s*echo "image_found=false" >> "\$GITHUB_OUTPUT"\s*\n\s*exit 0/.test(
     caseA,
   ),
 );
