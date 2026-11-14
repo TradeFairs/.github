@@ -170,6 +170,46 @@ check(
   ),
 );
 
+// ── 3b. Stale-PR-image guard (on_stale_pr_image; ADR-034 amendment) ──────
+//       Squash-merge parent must be an ancestor of the PR head, else the
+//       promoted image lacks commits that main already had. Default `warn`
+//       keeps today's behavior (promote); `rebuild` reuses the fallback
+//       steps via image_found=false; `fail` hard-fails. Staleness is always
+//       logged as ::warning:: regardless of the mode.
+check(
+  'on_stale_pr_image input declared as type: string, default: \'warn\'',
+  /on_stale_pr_image:\s*\n(?:.*\n)*?\s*type:\s*string\s*\n\s*default:\s*'warn'/.test(src),
+);
+check(
+  'ON_STALE env wired from inputs.on_stale_pr_image',
+  /ON_STALE:\s*\$\{\{\s*inputs\.on_stale_pr_image\s*\}\}/.test(resolveStep),
+);
+check(
+  'on_stale_pr_image value validated (warn|rebuild|fail) before any API call',
+  /case "\$ON_STALE" in\s*\n\s*warn\|rebuild\|fail\) ;;[\s\S]*?exit 1 ;;\s*\n\s*esac\s*\n\s*GH_ERR=/.test(resolveStep),
+);
+check(
+  'Freshness: compare <merge parent>...<PR head> (API, no clone) and behind_by decides',
+  /compare\/\$PARENT\.\.\.\$PR_SHA[\s\S]*?behind_by/.test(resolveStep) &&
+    /\.parents \| if length == 1/.test(resolveStep),
+);
+check(
+  'Freshness runs only when the PR image exists (FOUND=true gate)',
+  /if \[ "\$FOUND" = "true" \]; then\s*\n\s*STALE=false/.test(resolveStep),
+);
+check(
+  'Staleness is always logged as ::warning:: before the on_stale mode is applied',
+  /echo "::warning::\$WHY \(on_stale_pr_image=\$ON_STALE\)"\s*\n\s*case "\$ON_STALE" in/.test(resolveStep),
+);
+check(
+  'on_stale_pr_image=fail hard-fails (::error:: + exit 1); =rebuild sets image_found=false without exit',
+  /fail\)\s*\n\s*echo "::error::\$WHY[^\n]*"\s*\n\s*exit 1 ;;\s*\n\s*rebuild\)[^\n]*\n\s*echo "[^\n]*"\s*\n\s*echo "image_found=false" >> "\$GITHUB_OUTPUT" ;;/.test(resolveStep),
+);
+check(
+  'Default `warn` never changes image_found (no warn) branch in the on_stale case)',
+  !/\n\s*warn\)/.test(resolveStep.slice(resolveStep.indexOf('Freshness (ADR'))),
+);
+
 // ── 4. app-deploy-test.yml itself never hardcodes require_pr_image: true ─
 //       anywhere as a caller default — this file only ever DECLARES the
 //       input (default false). Actual `true` settings live in
