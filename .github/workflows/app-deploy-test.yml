@@ -84,6 +84,26 @@ on:
           recovery path are unaffected.
         type: boolean
         default: false
+      on_stale_pr_image:
+        description: >-
+          What to do when the promoted PR image is STALE: the PR head did not
+          contain the parent of the (squash) merge commit, i.e. other commits
+          landed on main after the PR branch was cut, and the PR image was built
+          without them (ADR-034 amendment 2026-07-06; measured 2026-11-13,
+          bvv-platform #1188/#1189: test ran 17 h without #1188 under a tag
+          carrying the merge SHA). Staleness is ALWAYS logged as `::warning::`
+          with counts, whatever this input says. Only commits touching paths
+          relevant for the app count (everything except `apps/<other>/`, `docs/`
+          and `*.md`; when `appPath` is empty only `docs/` and `*.md` are
+          ignored). Values: `warn` (default = today's behavior, promote anyway),
+          `rebuild` (do not promote; fall through to the fallback rebuild of the
+          merge commit, honors `imageStrategy`, works also when
+          `require_pr_image` is true — an explicit, logged opt-in, not the silent
+          fail-open TD-684 removed), `fail` (hard job failure). If freshness
+          cannot be verified (compare API failure, merge commit without exactly
+          one parent), `warn` promotes, `rebuild` rebuilds, `fail` fails.
+        type: string
+        default: 'warn'
       loadRestrictor:
         description: >-
           Extra flag passed to `kubectl kustomize` when rendering the overlay
@@ -209,6 +229,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REQUIRE_PR_IMAGE: ${{ inputs.require_pr_image }}
+          ON_STALE: ${{ inputs.on_stale_pr_image }}
+          APP_PATH: ${{ inputs.appPath }}
+          REPO: ${{ github.repository }}
+          MERGE_SHA: ${{ github.sha }}
         run: |
           # Find the PR merged into this commit; its head SHA is the :pr-<sha> tag
           # ci.yml (app-ci.yml@v2) built. On merge we retag that image — no rebuild.
@@ -219,6 +243,10 @@ jobs:
           # below become a hard failure instead — no fallback rebuild is reachable.
           # stderr se zachytí do souboru (dřív 2>/dev/null) a v chybové větvi se vypíše,
           # aby šlo odlišit chybějící gh (exit 127) od permissions/transient chyby.
+          case "$ON_STALE" in
+            warn|rebuild|fail) ;;
+            *) echo "::error::on_stale_pr_image must be warn|rebuild|fail (got '$ON_STALE')"; exit 1 ;;
+          esac
           GH_ERR=$(mktemp)
           GH_RC=0
           PR_SHA=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0].head.sha // ""' 2>"$GH_ERR") || GH_RC=$?
@@ -247,7 +275,9 @@ jobs:
           fi
           echo "Resolved PR head SHA: $PR_SHA"
           echo "pr_sha=$PR_SHA" >> "$GITHUB_OUTPUT"
+          FOUND=false
           if docker buildx imagetools inspect "ghcr.io/tradefairs/${{ inputs.slug }}:pr-$PR_SHA" >/dev/null 2>&1; then
+            FOUND=true
             echo "image_found=true" >> "$GITHUB_OUTPUT"
           else
             if [ "$REQUIRE_PR_IMAGE" = "true" ]; then
@@ -256,6 +286,55 @@ jobs:
             fi
             echo "::warning::ghcr.io/tradefairs/${{ inputs.slug }}:pr-$PR_SHA not found; will rebuild"
             echo "image_found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Freshness (ADR-034 amendment, stale-PR-image guard). A squash merge has one
+          # parent = main before the merge. The PR image is current only if that parent
+          # is an ancestor of the PR head (compare parent...head: behind_by == 0).
+          # API only, no clone. Later `image_found=false` wins over the line above.
+          if [ "$FOUND" = "true" ]; then
+            STALE=false; WHY=""; FERR=$(mktemp)
+            PARENT=$(gh api "repos/$REPO/commits/$MERGE_SHA" --jq '.parents | if length == 1 then .[0].sha else "" end' 2>>"$FERR") || PARENT=""
+            CMP=""
+            [ -n "$PARENT" ] && { CMP=$(gh api "repos/$REPO/compare/$PARENT...$PR_SHA" --jq '"\(.status) \(.behind_by)"' 2>>"$FERR") || CMP=""; }
+            if [ -z "$PARENT" ] || [ -z "$CMP" ]; then
+              STALE=unknown
+              echo "::group::gh api stderr (freshness check)"; cat "$FERR"; echo "::endgroup::"
+              WHY="freshness of PR image pr-$PR_SHA could not be verified (merge parent / compare API unavailable or merge commit not single-parent)"
+            else
+              BEHIND=${CMP#* }
+              if [ "$BEHIND" -gt 0 ] 2>/dev/null; then
+                FILES=$(gh api --paginate "repos/$REPO/compare/$PR_SHA...$PARENT" --jq '.files[].filename' 2>>"$FERR") || FILES="?"
+                NFILES=$(printf '%s\n' "$FILES" | grep -c . || true)
+                if [ "$FILES" = "?" ] || [ "$NFILES" -ge 300 ]; then
+                  NREL=unknown   # list unavailable or truncated by the API (300 files) -> assume relevant
+                else
+                  # relevant = everything except docs/, *.md and (when appPath set) apps/<other>/
+                  NREL=$(printf '%s\n' "$FILES" | grep -v -e '^docs/' -e '\.md$' \
+                    | awk -v app="${APP_PATH%/}/" 'NF && (app == "/" || substr($0,1,5) != "apps/" || index($0,app) == 1)' | grep -c . || true)
+                fi
+                if [ "$NREL" = "0" ]; then
+                  echo "::warning::PR image pr-$PR_SHA is $BEHIND commit(s) behind merge parent $PARENT ($NFILES file(s), 0 relevant for ${APP_PATH:-the repo}) — not stale for this app, promoting"
+                else
+                  STALE=true
+                  WHY="PR image pr-$PR_SHA is STALE: PR branch lacked $BEHIND commit(s) of main ($NFILES file(s), relevant for ${APP_PATH:-the repo}: $NREL) present in merge parent $PARENT; promoting it would ship a tag $MERGE_SHA without them"
+                fi
+              else
+                echo "PR image pr-$PR_SHA is current (compare status ${CMP% *}, behind_by 0)"
+              fi
+            fi
+            rm -f "$FERR"
+            if [ "$STALE" != "false" ]; then
+              echo "::warning::$WHY (on_stale_pr_image=$ON_STALE)"
+              case "$ON_STALE" in
+                fail)
+                  echo "::error::$WHY — on_stale_pr_image=fail. Fix: update the PR branch from main and merge again, or run workflow_dispatch (rebuild from main)."
+                  exit 1 ;;
+                rebuild)
+                  echo "Not promoting; falling through to fallback rebuild of $MERGE_SHA"
+                  echo "image_found=false" >> "$GITHUB_OUTPUT" ;;
+              esac
+            fi
           fi
 
       - name: Read version from package.json

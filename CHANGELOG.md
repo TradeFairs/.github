@@ -3,6 +3,27 @@
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
 (`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
 
+## vNEXT — Pojistka proti zastaralému PR image při promotion (`on_stale_pr_image`)
+
+- **`app-deploy-test.yml`, krok „Resolve PR image"**: po nalezení `:pr-<head sha>` image
+  ověří, že rodič (squash) merge commitu je předkem hlavy PR (`gh api
+  compare/<parent>...<head>` → `behind_by`, jen API, bez klonu). Incident 2026-11-13
+  (bvv-platform #1188/#1189, bvv-directory-api): PR větev vznikla před #1188, deploy po
+  merge #1189 jen přeznačil její image na `…-test-<merge sha>` a test 17 h běžel bez #1188.
+  Počítají se jen chybějící commity zasahující relevantní cesty (vše kromě `docs/`, `*.md`
+  a `apps/<jiná appka>/`; při prázdném `appPath` jen `docs/` a `*.md`); neúplný seznam
+  souborů (API limit 300) se bere jako relevantní.
+- **Nový vstup `on_stale_pr_image`** (`warn` | `rebuild` | `fail`, výchozí `warn` = dnešní
+  chování, promotion proběhne). Zastaralost je v každém režimu vidět jako `::warning::` s počty
+  (commitů, souborů, relevantních souborů). `rebuild` nepřeznačí a spadne do záložního
+  rebuildu merge commitu (docker i crane dle `imageStrategy`; funguje i s
+  `require_pr_image: true` — explicitní opt-in, ne tiché fail-open, které TD-684 zrušil).
+  `fail` shodí job. Nelze-li aktuálnost ověřit (compare API selže, merge commit nemá právě
+  jednoho rodiče): `warn` promuje, `rebuild` rebuilduje, `fail` padá.
+- Rebase-merge (více commitů, rodič není poslední commit main před merge) se nepodporuje;
+  org používá squash.
+- Kontraktní test (`test:promotion-contract`) hlídá novou pojistku. Callery se bumpují zvlášť.
+
 ## v2.5.22 — „Resolve PR image" vypíše chybu `gh api`
 
 - **`app-deploy-test.yml`, krok „Resolve PR image"**: volání `gh api …/commits/<sha>/pulls`
