@@ -20,7 +20,9 @@ concurrency:
 
 jobs:
   tests:
-    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '["self-hosted","liv26"]') }}
+    # Repo je public: skupiny self-hosted runneru public repa nepousti (zamerne);
+    # GitHub-hosted runner je pro public repo zdarma.
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
