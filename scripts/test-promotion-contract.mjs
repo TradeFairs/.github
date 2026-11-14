@@ -142,11 +142,26 @@ check(
 //       image_found != 'true' and is not otherwise reachable when
 //       require_pr_image forces early exits in all 3 failure cases —
 //       i.e. no build/layer push occurs on the require_pr_image=true path.
+// Od #42/#59 jsou dva záložní kroky (docker build-push-action, crane layer-append),
+// oba gated `image_found != 'true' && inputs.imageStrategy == '<strategie>'`;
+// action je pinnutá na SHA (ne @v7). Kontrola je stejně přísná: podmínka musí
+// bezprostředně předcházet příslušnému kroku a image_found != 'true' je povinné.
 check(
-  'Fallback rebuild step still gated on steps.pr_image.outputs.image_found != \'true\'',
-  /if: steps\.pr_image\.outputs\.image_found != 'true'\s*\n\s*uses: docker\/build-push-action@v7/.test(
+  'Docker fallback rebuild step gated on image_found != \'true\' && imageStrategy == docker',
+  /if: steps\.pr_image\.outputs\.image_found != 'true' && inputs\.imageStrategy == 'docker'\s*\n\s*uses: docker\/build-push-action@[0-9a-f]{40}/.test(
     src,
   ),
+);
+check(
+  'Crane fallback rebuild step gated on image_found != \'true\' && imageStrategy == crane',
+  /if: steps\.pr_image\.outputs\.image_found != 'true' && inputs\.imageStrategy == 'crane'\s*\n\s*uses: \.\/\.github\/actions\/deploy-test-crane-image/.test(
+    src,
+  ),
+);
+check(
+  'No other build step (build-push-action / deploy-test-crane-image) lacks the image_found != \'true\' gate',
+  (src.match(/uses: (?:docker\/build-push-action@|\.\/\.github\/actions\/deploy-test-crane-image)/g) || []).length ===
+    (src.match(/if: steps\.pr_image\.outputs\.image_found != 'true'[^\n]*\n\s*uses: (?:docker\/build-push-action@|\.\/\.github\/actions\/deploy-test-crane-image)/g) || []).length,
 );
 check(
   'Promote (retag, no rebuild) step still gated on image_found == \'true\' and uses imagetools create (no docker/build-push-action)',
