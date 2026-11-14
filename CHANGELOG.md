@@ -3,7 +3,7 @@
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
 (`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
 
-## vNEXT — Pojistka proti zastaralému PR image při promotion (`on_stale_pr_image`)
+## v2.5.23 — Pojistka proti zastaralému PR image při promotion (`on_stale_pr_image`)
 
 - **`app-deploy-test.yml`, krok „Resolve PR image"**: po nalezení `:pr-<head sha>` image
   ověří, že rodič (squash) merge commitu je předkem hlavy PR (`gh api
