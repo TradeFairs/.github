@@ -3,7 +3,7 @@
 Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver tag**
 (`@v2.5.12`); movable `@v2` byl smazán 2026-08-31 (zamrzlý na `9d18565`, viz README).
 
-## v2.5.23 — Pojistka proti zastaralému PR image při promotion (`on_stale_pr_image`)
+## v2.5.24 — Pojistka proti zastaralému PR image při promotion (`on_stale_pr_image`)
 
 - **`app-deploy-test.yml`, krok „Resolve PR image"**: po nalezení `:pr-<head sha>` image
   ověří, že rodič (squash) merge commitu je předkem hlavy PR (`gh api
@@ -23,6 +23,12 @@ Reusable workflow changes, newest first. Konzumenti pinují **explicitní semver
 - Rebase-merge (více commitů, rodič není poslední commit main před merge) se nepodporuje;
   org používá squash.
 - Kontraktní test (`test:promotion-contract`) hlídá novou pojistku. Callery se bumpují zvlášť.
+
+## v2.5.23 — beze změny workflow (jen kontraktní test)
+
+- Tag vznikl 2026-11-14 omylem o krok dřív, než byla mergnuta změna pro v2.5.24. Obsahem je
+  v2.5.22 + oprava kontraktního testu pojistky záložního rebuildu (#73); workflow soubory jsou
+  shodné s v2.5.22. Tag se nemaže ani nepřesouvá; callery ho nepoužívají.
 
 ## v2.5.22 — „Resolve PR image" vypíše chybu `gh api`
 
